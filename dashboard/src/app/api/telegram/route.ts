@@ -549,20 +549,28 @@ async function handleCommand(text: string) {
         break;
       }
 
-      // ── Natural language → AI with full live context ──
-      await sendTg("🤔 _Analyzing..._");
+      // ── Natural language → DIRECT Anthropic API call with full context ──
+      await sendTg("🤔 _Analyzing markets..._");
       try {
+        const anthropicKey = process.env.ANTHROPIC_API_KEY;
+        if (!anthropicKey) {
+          await sendTg("⚠️ ANTHROPIC\\_API\\_KEY not set. Add it to Vercel env vars.");
+          break;
+        }
+
         // Fetch ALL live data in parallel
-        const [deltaPos, deltaWallet, scanResult, dhanStatus] = await Promise.allSettled([
+        const [deltaPos, deltaWallet, scanResult, indiaScan, dhanStatus] = await Promise.allSettled([
           selfFetch("/api/delta?action=positions"),
           selfFetch("/api/delta?action=wallet"),
           selfFetch("/api/delta-scanner?action=scan"),
+          selfFetch("/api/india-scanner?action=scan"),
           selfFetch("/api/dhan?action=status"),
         ]);
 
         const positions = deltaPos.status === "fulfilled" ? deltaPos.value : {};
         const wallet = deltaWallet.status === "fulfilled" ? deltaWallet.value : {};
         const scan = scanResult.status === "fulfilled" ? scanResult.value : {};
+        const india = indiaScan.status === "fulfilled" ? indiaScan.value : {};
         const dhan = dhanStatus.status === "fulfilled" ? dhanStatus.value : {};
 
         const openPos = (positions.result || []).filter((p: {size?: string}) => parseFloat(p.size || "0") > 0);
@@ -570,105 +578,121 @@ async function handleCommand(text: string) {
           `${p.product_symbol}: ${p.size}x @ $${p.entry_price} | PnL: $${p.unrealized_pnl}`
         ).join("\n") || "None";
 
-        const topSignals = (scan.topSignals || []).slice(0, 5).map((s: {symbol: string; score: number; direction: string; reason: string; mark: number; ask: number; dte: number; sizing: {contracts: number; costUsd: number}}) =>
+        const cryptoSignals = (scan.topSignals || []).slice(0, 5).map((s: {symbol: string; score: number; direction: string; reason: string; mark: number; ask: number; dte: number}) =>
           `${s.symbol} | Score: ${(s.score * 100).toFixed(0)}% | ${s.direction} | $${s.ask || s.mark} | ${s.dte}DTE | ${s.reason}`
-        ).join("\n") || "No signals above threshold";
+        ).join("\n") || "No crypto signals above threshold";
 
-        const systemPrompt = `You are AlgoKing — an elite crypto options trading AI running on Delta Exchange India. You make decisions like Renaissance Technologies and Two Sigma: data-driven, calculated, no emotion.
+        const indiaSignals = (india.signals || []).slice(0, 3).map((s: {instrument: string; score: number; direction: string; reason: string}) =>
+          `${s.instrument} | Score: ${(s.score * 100).toFixed(0)}% | ${s.direction} | ${s.reason}`
+        ).join("\n") || "No India signals";
 
-## YOUR LIVE ACCOUNT (real-time data):
-Equity: $${wallet.meta?.net_equity || "?"}
-Open Positions:
+        const systemPrompt = `You are AlgoKing — an autonomous trading AI managing real money on Delta Exchange (crypto) and Dhan (Indian markets). You HAVE live API access to execute trades. You are NOT a chatbot giving advice — you are the trader.
+
+CRITICAL: You CAN and SHOULD execute trades when setups are good. Output /buy or /sell commands and they WILL be auto-executed.
+
+## LIVE ACCOUNT:
+Delta Exchange Equity: $${wallet.meta?.net_equity || "118"}
+Open Crypto Positions:
 ${posLines}
 
-## MARKET STATE (live):
-BTC: $${scan.btc?.price?.toLocaleString() || "?"} | RSI: ${scan.btc?.rsi?.toFixed(0) || "?"} | 24h: ${scan.btc?.change24h?.toFixed(1) || "0"}% | Bias: ${scan.btc?.bias || "?"}
-ETH: $${scan.eth?.price?.toLocaleString() || "?"} | RSI: ${scan.eth?.rsi?.toFixed(0) || "?"} | 24h: ${scan.eth?.change24h?.toFixed(1) || "0"}% | Bias: ${scan.eth?.bias || "?"}
-Dhan (Indian Markets): ${dhan.connected ? "Connected" : "Not connected"}
+## LIVE MARKET DATA:
+BTC: $${scan.btc?.price?.toLocaleString() || "?"} | RSI: ${scan.btc?.rsi?.toFixed(0) || "?"} | ${scan.btc?.bias || "?"} | Vol: ${scan.btc?.realizedVol?.toFixed(0) || "?"}%
+ETH: $${scan.eth?.price?.toLocaleString() || "?"} | RSI: ${scan.eth?.rsi?.toFixed(0) || "?"} | ${scan.eth?.bias || "?"}
+NIFTY: ₹${india.nifty?.price?.toLocaleString() || "?"} | RSI: ${india.nifty?.rsi?.toFixed(0) || "?"} | ${india.nifty?.bias || "?"}
+BANKNIFTY: ₹${india.banknifty?.price?.toLocaleString() || "?"} | RSI: ${india.banknifty?.rsi?.toFixed(0) || "?"} | ${india.banknifty?.bias || "?"}
+VIX: ${india.vix?.toFixed(1) || "?"}
+Dhan: ${dhan.connected ? "Connected" : "Not connected"}
 
-## TOP ALGO SIGNALS (scored by 5-layer engine):
-${topSignals}
+## ALGO SIGNALS (5-layer engine output):
+Crypto:
+${cryptoSignals}
 
-## YOUR CAPABILITIES:
-You CAN execute trades. When you decide a trade is good, output the command:
-/buy SYMBOL SIZE PRICE — to buy options
-/sell SYMBOL SIZE — to sell/close
-/scan — to re-scan markets
+India:
+${indiaSignals}
+
+## TRADE EXECUTION:
+To execute a crypto trade, output: /buy SYMBOL SIZE PRICE
+To sell: /sell SYMBOL SIZE
+To scan: /scan
+These commands are auto-executed by the system.
 
 ## RULES:
-1. Never risk more than 20% of equity on one trade
-2. Always explain WHY before suggesting a trade (which layers triggered)
-3. If no good setup exists, say "No trade — waiting for better setup"
-4. Be specific: exact symbol, size, price, TP, SL
-5. Max 5 concurrent positions
-6. Think like a hedge fund PM — every dollar matters at this account size`;
+- Max 20% equity per trade, max 5 positions
+- Always state which of the 5 layers (StatArb, MeanRev, Momentum, VolArb, Flow) triggered
+- Be specific: exact symbol, size, price
+- If no setup, say "No trade — algo waiting for A+ setup"
+- You manage real money — be responsible but decisive`;
 
-        const chatRes = await fetch(`${DASHBOARD_URL}/api/chat`, {
+        // Call Anthropic directly
+        const chatRes = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": anthropicKey,
+            "anthropic-version": "2023-06-01",
+          },
           body: JSON.stringify({
-            messages: [
-              { role: "user", content: text },
-            ],
-            systemOverride: systemPrompt,
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 1500,
+            system: systemPrompt,
+            messages: [{ role: "user", content: text }],
           }),
         });
 
-        if (chatRes.ok) {
-          const chatData = await chatRes.json();
-          if (chatData.response && !chatData.error) {
-            const response = chatData.response as string;
+        const chatOk = chatRes.ok;
+        const chatData = chatOk ? await chatRes.json() : null;
+        const response = chatData?.content?.[0]?.text || "";
 
-            // Send the AI response
-            if (response.length <= 4000) {
-              await sendTg(response);
-            } else {
-              const chunks = response.match(/[\s\S]{1,4000}/g) || [response];
-              for (const chunk of chunks) {
-                await sendTg(chunk);
-              }
-            }
+        void chatOk; // used for response check
 
-            // ── AUTO-EXECUTE: detect /buy or /sell commands in AI response ──
-            const buyMatch = response.match(/\/buy\s+([\w-]+)\s+(\d+)(?:\s+([\d.]+))?/);
-            const sellMatch = response.match(/\/sell\s+([\w-]+)\s+(\d+)(?:\s+([\d.]+))?/);
-
-            if (buyMatch) {
-              const [, symbol, size, price] = buyMatch;
-              await sendTg(`⚡ _Auto-executing: Buy ${size}x ${symbol}..._`);
-              const orderBody: Record<string, unknown> = {
-                action: "place-order", productSymbol: symbol, size: parseInt(size),
-                side: "buy", orderType: price ? "limit_order" : "market_order",
-                timeInForce: price ? "gtc" : "ioc", clientOrderId: `ai_${Date.now()}`,
-              };
-              if (price) orderBody.limitPrice = price;
-              const result = await selfFetch("/api/delta", orderBody);
-              if (result.result?.id) {
-                await sendTg(`✅ *Executed:* Buy ${size}x ${symbol}\nOrder: \`${result.result.id}\` | ${result.result.state}`);
-              } else {
-                await sendTg(`❌ Execution failed: ${JSON.stringify(result.error || result).slice(0, 200)}`);
-              }
-            } else if (sellMatch) {
-              const [, symbol, size, price] = sellMatch;
-              await sendTg(`⚡ _Auto-executing: Sell ${size}x ${symbol}..._`);
-              const orderBody: Record<string, unknown> = {
-                action: "place-order", productSymbol: symbol, size: parseInt(size),
-                side: "sell", orderType: price ? "limit_order" : "market_order",
-                timeInForce: price ? "gtc" : "ioc", reduceOnly: true, clientOrderId: `ai_sell_${Date.now()}`,
-              };
-              if (price) orderBody.limitPrice = price;
-              const result = await selfFetch("/api/delta", orderBody);
-              if (result.result?.id) {
-                await sendTg(`✅ *Sold:* ${size}x ${symbol}\nOrder: \`${result.result.id}\` | ${result.result.state}`);
-              } else {
-                await sendTg(`❌ Sell failed: ${JSON.stringify(result.error || result).slice(0, 200)}`);
-              }
-            }
+        if (response) {
+          // Send the AI response
+          if (response.length <= 4000) {
+            await sendTg(response);
           } else {
-            await sendTg(chatData.response || "⚠️ AI not available. Set ANTHROPIC\\_API\\_KEY in Vercel env vars.");
+            const chunks = response.match(/[\s\S]{1,4000}/g) || [response];
+            for (const chunk of chunks) {
+              await sendTg(chunk);
+            }
+          }
+
+          // ── AUTO-EXECUTE: detect /buy or /sell commands in AI response ──
+          const buyMatch = response.match(/\/buy\s+([\w-]+)\s+(\d+)(?:\s+([\d.]+))?/);
+          const sellMatch = response.match(/\/sell\s+([\w-]+)\s+(\d+)(?:\s+([\d.]+))?/);
+
+          if (buyMatch) {
+            const [, symbol, size, price] = buyMatch;
+            await sendTg(`⚡ _Auto-executing: Buy ${size}x ${symbol}..._`);
+            const orderBody: Record<string, unknown> = {
+              action: "place-order", productSymbol: symbol, size: parseInt(size),
+              side: "buy", orderType: price ? "limit_order" : "market_order",
+              timeInForce: price ? "gtc" : "ioc", clientOrderId: `ai_${Date.now()}`,
+            };
+            if (price) orderBody.limitPrice = price;
+            const result = await selfFetch("/api/delta", orderBody);
+            if (result.result?.id) {
+              await sendTg(`✅ *Executed:* Buy ${size}x ${symbol}\nOrder: \`${result.result.id}\` | ${result.result.state}`);
+            } else {
+              await sendTg(`❌ Execution failed: ${JSON.stringify(result.error || result).slice(0, 200)}`);
+            }
+          } else if (sellMatch) {
+            const [, symbol, size, price] = sellMatch;
+            await sendTg(`⚡ _Auto-executing: Sell ${size}x ${symbol}..._`);
+            const orderBody: Record<string, unknown> = {
+              action: "place-order", productSymbol: symbol, size: parseInt(size),
+              side: "sell", orderType: price ? "limit_order" : "market_order",
+              timeInForce: price ? "gtc" : "ioc", reduceOnly: true, clientOrderId: `ai_sell_${Date.now()}`,
+            };
+            if (price) orderBody.limitPrice = price;
+            const result = await selfFetch("/api/delta", orderBody);
+            if (result.result?.id) {
+              await sendTg(`✅ *Sold:* ${size}x ${symbol}\nOrder: \`${result.result.id}\` | ${result.result.state}`);
+            } else {
+              await sendTg(`❌ Sell failed: ${JSON.stringify(result.error || result).slice(0, 200)}`);
+            }
           }
         } else {
-          await sendTg("⚠️ Could not reach AI. Dashboard may be down.");
+          await sendTg("⚠️ AI not available. Check ANTHROPIC\\_API\\_KEY.");
         }
       } catch (err) {
         await sendTg(`⚠️ Error: ${String(err).slice(0, 200)}`);
