@@ -29,17 +29,74 @@ function GreekPill({ label, value, color }: { label: string; value: number; colo
   );
 }
 
+// Map a raw Dhan position to AlgoPosition shape
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapDhanPosition(p: any, idx: number): AlgoPosition {
+  const rawQty = p.netQty != null ? p.netQty : ((p.dayBuyQty ?? 0) - (p.daySellQty ?? 0));
+  const qty = Math.abs(rawQty) || 1;
+  const entry = p.netQty > 0 ? (p.buyAvg ?? 0) : (p.sellAvg ?? 0);
+  const unrealized = p.unrealizedProfit ?? 0;
+  const current = qty > 0 ? entry + unrealized / qty : entry;
+  const pnlTotal = (p.realizedProfit ?? 0) + unrealized;
+  const pnlPct = entry > 0 ? (pnlTotal / (entry * qty)) * 100 : 0;
+  const side: "LONG" | "SHORT" = (p.positionType === "SHORT" || (p.netQty ?? 0) < 0) ? "SHORT" : "LONG";
+  const seg: string = p.exchangeSegment ?? "";
+  const market = seg.includes("FNO") ? "F&O" : seg.includes("MCX") ? "MCX" : "EQ";
+  const slippage = entry * 0.01;
+  return {
+    id: `dhan-${idx}`,
+    strategy: p.productType ?? "INTRADAY",
+    asset: p.tradingSymbol ?? p.securityId ?? "UNKNOWN",
+    side,
+    entry: +entry.toFixed(2),
+    current: +current.toFixed(2),
+    target: +(entry * (side === "LONG" ? 1.02 : 0.98)).toFixed(2),
+    stopLoss: +(entry * (side === "LONG" ? 0.99 : 1.01)).toFixed(2),
+    size: qty,
+    pnl: +pnlTotal.toFixed(2),
+    pnlPercent: +pnlPct.toFixed(2),
+    confidence: 75,
+    mcScore: 7.5,
+    status: qty !== 0 ? "active" : "closed",
+    openTime: new Date().toISOString(),
+    riskReward: 2,
+    market,
+    drawdown: Math.min(0, pnlPct),
+    maxFavorable: Math.max(0, pnlPct),
+  };
+}
+
 export default function AlgoPositionsPanel() {
   const [tab, setTab] = useState<typeof tabs[number]>("Positions");
   const [positions, setPositions] = useState<AlgoPosition[]>([]);
   const [equity, setEquity] = useState<EquityPoint[]>([]);
   const [stratPerf, setStratPerf] = useState<StrategyPerf[]>([]);
   const [marketFilter, setMarketFilter] = useState("All");
+  const [isLive, setIsLive] = useState(false);
 
   useEffect(() => {
-    const update = () => { setPositions(generateAlgoPositions()); setEquity(generateEquityCurve()); setStratPerf(generateStrategyPerf()); };
-    update();
-    const i = setInterval(update, 20000);
+    setEquity(generateEquityCurve());
+    setStratPerf(generateStrategyPerf());
+
+    const fetchPositions = async () => {
+      try {
+        const res = await fetch("/api/dhan?action=positions", { cache: "no-store" });
+        if (res.ok) {
+          const raw = await res.json();
+          const arr = Array.isArray(raw) ? raw : (raw.data ?? []);
+          if (arr.length > 0) {
+            setPositions(arr.map(mapDhanPosition));
+            setIsLive(true);
+            return;
+          }
+        }
+      } catch { /* fall through */ }
+      setPositions(generateAlgoPositions());
+      setIsLive(false);
+    };
+
+    fetchPositions();
+    const i = setInterval(fetchPositions, 15000);
     return () => clearInterval(i);
   }, []);
 
@@ -57,6 +114,7 @@ export default function AlgoPositionsPanel() {
           <Bot className="w-3.5 h-3.5 text-blue-400" />
           <h2 className="text-[11px] font-bold text-white">Mother Algo</h2>
           <span className="w-1.5 h-1.5 rounded-full bg-blue-400 pulse-dot" />
+          {isLive && <span className="text-[8px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-bold">DHAN LIVE</span>}
         </div>
         <span className={`text-[10px] font-black ${totalPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
           P&L: {totalPnl >= 0 ? "+" : ""}₹{Math.abs(totalPnl).toLocaleString()}

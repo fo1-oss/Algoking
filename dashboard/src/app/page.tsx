@@ -20,6 +20,8 @@ import SocialIntelPanel from "@/components/SocialIntelPanel";
 import NewsTerminalPanel from "@/components/NewsTerminalPanel";
 import MacroDashboardPanel from "@/components/MacroDashboardPanel";
 import WorkflowBuilderPanel from "@/components/WorkflowBuilderPanel";
+import MiroFishPanel from "@/components/MiroFishPanel";
+import OptionsBacktestPanel from "@/components/OptionsBacktestPanel";
 import OptionsChainPanel from "@/components/OptionsChainPanel";
 import BacktesterPanel from "@/components/BacktesterPanel";
 import AlgoSignalsPanel from "@/components/AlgoSignalsPanel";
@@ -68,6 +70,8 @@ const VIEW_LABELS: Record<ViewId, string> = {
   "sector-rotation": "Sector Rotation",
   "trade-journal": "Trade Journal",
   "algo-blueprint": "Algo Blueprint",
+  "mirofish": "MiroFish Swarm",
+  "options-backtest": "1000%+ Options Scanner",
 };
 
 export default function Home() {
@@ -159,6 +163,8 @@ export default function Home() {
           {activeView === "backtester" && <div className="h-full p-3"><PaperTradingPanel /></div>}
           {activeView === "algo-blueprint" && <div className="h-full overflow-auto p-3"><BlueprintPanel /></div>}
           {activeView === "ai-chat" && <div className="h-full p-3"><ChatPanel /></div>}
+          {activeView === "mirofish" && <div className="h-full p-3"><MiroFishPanel /></div>}
+          {activeView === "options-backtest" && <div className="h-full p-3"><OptionsBacktestPanel /></div>}
         </main>
       </div>
 

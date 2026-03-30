@@ -1,5 +1,5 @@
 "use client";
-import { Activity, Ship, Globe, Fish, BarChart3, Bot, Settings, Bell, ChevronLeft, ChevronRight, LineChart, Shield, MessageCircle, LayoutGrid, Calendar, Search, DollarSign, Zap, Users, Newspaper, Landmark, TrendingUp, Workflow, Layers, FlaskConical, Crosshair, PieChart, GitCompare, BookOpen, Target } from "lucide-react";
+import { Activity, Ship, Globe, Fish, BarChart3, Bot, Settings, Bell, ChevronLeft, ChevronRight, LineChart, Shield, MessageCircle, LayoutGrid, Calendar, Search, DollarSign, Zap, Users, Newspaper, Landmark, TrendingUp, Workflow, Layers, FlaskConical, Crosshair, PieChart, GitCompare, BookOpen, Target, Brain } from "lucide-react";
 import { useState } from "react";
 import type { ViewId } from "@/lib/data";
 
@@ -49,10 +49,17 @@ const navSections: { title?: string; items: { icon: typeof Activity; label: stri
       { icon: MessageCircle, label: "AI Chat", id: "ai-chat" },
     ],
   },
+  {
+    title: "AI PREDICT",
+    items: [
+      { icon: Brain, label: "MiroFish Swarm", id: "mirofish" },
+      { icon: FlaskConical, label: "1000x Scanner", id: "options-backtest" },
+    ],
+  },
 ];
 
 export default function Sidebar({ activeView, onViewChange }: Props) {
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
   return (
     <aside style={{ width: collapsed ? 52 : 180 }} className="flex-shrink-0 flex flex-col border-r border-white/5 frosted transition-[width] duration-200 overflow-hidden">
       {/* Logo */}

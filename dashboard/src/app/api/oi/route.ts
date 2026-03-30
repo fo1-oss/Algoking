@@ -136,7 +136,13 @@ export async function GET(req: NextRequest) {
   const token = process.env.FYERS_ACCESS_TOKEN;
   if (token) {
     try {
-      let url = `https://api-t1.fyers.in/data/options-chain-v3?symbol=${encodeURIComponent(symbol)}&strikecount=${strikecount}`;
+      // Fyers uses different symbol names for some indices
+      const fyersSymbol = symbol
+        .replace("NSE:BANKNIFTY-INDEX", "NSE:NIFTYBANK-INDEX")
+        .replace("NSE:FINNIFTY-INDEX", "NSE:FINNIFTY-INDEX")
+        .replace("NSE:MIDCPNIFTY-INDEX", "NSE:MIDCPNIFTY-INDEX");
+
+      let url = `https://api-t1.fyers.in/data/options-chain-v3?symbol=${encodeURIComponent(fyersSymbol)}&strikecount=${strikecount}`;
       if (expiry) url += `&timestamp=${expiry}`;
 
       const res = await fetch(url, {
@@ -146,7 +152,11 @@ export async function GET(req: NextRequest) {
 
       if (res.ok) {
         const data = await res.json();
-        return NextResponse.json({ ...data, source: "fyers-live" });
+        // Only return if we actually got chain data
+        const hasData = data?.data?.optionsChain?.length > 0;
+        if (hasData) {
+          return NextResponse.json({ ...data, source: "fyers-live" });
+        }
       }
     } catch { /* Fyers failed, fall through to mock */ }
   }

@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
-import { Crosshair, TrendingUp, TrendingDown, Clock, Target, Shield, Zap, AlertTriangle, FlaskConical, Loader2 } from "lucide-react";
+import { Crosshair, TrendingUp, TrendingDown, Clock, Target, Shield, Zap, AlertTriangle, FlaskConical, Loader2, Play, CheckCircle, XCircle } from "lucide-react";
 import { useMarketData } from "@/hooks/useYahooData";
 
 interface Signal {
@@ -240,6 +240,99 @@ const STATUS_COLORS: Record<string, { bg: string; text: string }> = {
 
 const CONF_COLORS: Record<string, string> = { HIGH: "text-[#BFFF00]", MEDIUM: "text-amber-400", LOW: "text-[#666]" };
 
+// Dhan security IDs for common NIFTY/BANKNIFTY options (NSE_FNO)
+// These are the Dhan instrument IDs — updated monthly
+const DHAN_LOT_SIZES: Record<string, number> = { NIFTY: 25, BANKNIFTY: 15 };
+
+async function executeOnDhan(sig: Signal): Promise<{ success: boolean; message: string }> {
+  const isNifty = sig.symbol.includes("NIFTY") && !sig.symbol.includes("BANKNIFTY");
+  const isBankNifty = sig.symbol.includes("BANKNIFTY");
+  const lotSize = isBankNifty ? DHAN_LOT_SIZES.BANKNIFTY : DHAN_LOT_SIZES.NIFTY;
+
+  // Parse strike and option type from symbol like "NIFTY 22550 PE"
+  const parts = sig.symbol.split(" ");
+  const optionType = parts[parts.length - 1]; // CE or PE
+  const strikeStr = parts[parts.length - 2];
+
+  const underlyingScrip = isBankNifty ? 25 : 13;
+
+  // Step 1: Get nearest expiry from Dhan
+  let nearestExpiry = "";
+  try {
+    const expiryRes = await fetch("/api/dhan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "expiry-list", underlyingScrip, underlyingSeg: "IDX_I" }),
+    });
+    if (expiryRes.ok) {
+      const expiryData = await expiryRes.json();
+      // Dhan returns array of "YYYY-MM-DD" strings
+      const list: string[] = expiryData.data || expiryData || [];
+      const today = new Date().toISOString().slice(0, 10);
+      nearestExpiry = list.find((d: string) => d >= today) || list[0] || "";
+    }
+  } catch { /* will try without expiry */ }
+
+  // Step 2: Fetch option chain with expiry
+  const chainRes = await fetch("/api/dhan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "option-chain",
+      underlyingScrip,
+      underlyingSeg: "IDX_I",
+      ...(nearestExpiry ? { expiry: nearestExpiry } : {}),
+    }),
+  });
+
+  let securityId = "";
+  if (chainRes.ok) {
+    const chainData = await chainRes.json();
+    const strike = parseFloat(strikeStr);
+    // Dhan option chain format: { oc: [{ strikePrice, callOption: { securityId }, putOption: { securityId } }] }
+    const ocList: { strikePrice?: number; callOption?: { securityId?: string }; putOption?: { securityId?: string } }[] =
+      chainData.oc || chainData.data?.oc || [];
+    const match = ocList.find((o) => Number(o.strikePrice) === strike);
+    if (match) {
+      const side = optionType === "CE" ? match.callOption : match.putOption;
+      securityId = String(side?.securityId || "");
+    }
+    // Fallback: flat array format
+    if (!securityId) {
+      const flat: { strikePrice?: number; optionType?: string; securityId?: string }[] =
+        Array.isArray(chainData) ? chainData : Array.isArray(chainData.data) ? chainData.data : [];
+      const flatMatch = flat.find((o) => Number(o.strikePrice) === strike && o.optionType === optionType);
+      if (flatMatch) securityId = String(flatMatch.securityId || "");
+    }
+  }
+
+  if (!securityId) {
+    const debugInfo = nearestExpiry ? `expiry=${nearestExpiry}` : "no expiry found";
+    return { success: false, message: `Could not resolve security ID for ${sig.symbol} (${debugInfo}). Check Dhan connection.` };
+  }
+
+  const res = await fetch("/api/dhan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "place-order",
+      transactionType: sig.side,
+      exchangeSegment: "NSE_FNO",
+      productType: "INTRADAY",
+      orderType: "MARKET",
+      securityId,
+      quantity: lotSize,
+      correlationId: `sig_${sig.id}_${Date.now()}`,
+    }),
+  });
+
+  const data = await res.json();
+  if (data.success || data.orderId) {
+    return { success: true, message: `Order placed! ID: ${data.orderId || data.correlationId}` };
+  }
+  return { success: false, message: data.error || data.message || JSON.stringify(data) };
+}
+
 export default function AlgoSignalsPanel() {
   const { tickers } = useMarketData();
   const [signals, setSignals] = useState<Signal[]>([]);
@@ -247,6 +340,8 @@ export default function AlgoSignalsPanel() {
   const [backtestId, setBacktestId] = useState<string | null>(null);
   const [backtestResult, setBacktestResult] = useState<QuickBacktest | null>(null);
   const [backtestLoading, setBacktestLoading] = useState(false);
+  const [executing, setExecuting] = useState<string | null>(null);
+  const [execResults, setExecResults] = useState<Record<string, { success: boolean; message: string }>>({});
 
   useEffect(() => {
     const nifty = tickers.find(t => t.symbol === "^NSEI" || t.displayName === "NIFTY");
@@ -378,22 +473,45 @@ export default function AlgoSignalsPanel() {
                 <span className="flex items-center gap-1"><Clock className="w-2.5 h-2.5" />{Math.floor((Date.now() - new Date(sig.time).getTime()) / 60000)}m ago</span>
                 <span>{sig.timeframe} chart</span>
               </div>
-              <button onClick={() => {
-                if (backtestId === sig.id) { setBacktestId(null); setBacktestResult(null); return; }
-                setBacktestId(sig.id);
-                setBacktestLoading(true);
-                setBacktestResult(null);
-                // Simulate processing delay
-                setTimeout(() => {
-                  const underlying = sig.symbol.includes("NIFTY") ? "NIFTY" : sig.symbol.includes("BANKNIFTY") ? "BANKNIFTY" : "NIFTY";
-                  setBacktestResult(runQuickBacktest(sig.strategy, underlying));
-                  setBacktestLoading(false);
-                }, 600);
-              }}
-                className="text-[8px] px-2.5 py-1 rounded-full bg-[#BFFF00]/8 text-[#BFFF00] font-bold hover:bg-[#BFFF00]/15 transition flex items-center gap-1">
-                <FlaskConical className="w-2.5 h-2.5" />
-                {backtestId === sig.id ? "Hide Backtest" : "Backtest This"}
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Execute on Dhan */}
+                {(sig.status === "ACTIVE" || sig.status === "PENDING") && (
+                  execResults[sig.id] ? (
+                    <span className={`text-[8px] flex items-center gap-1 px-2 py-1 rounded-full font-bold ${execResults[sig.id].success ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
+                      {execResults[sig.id].success ? <CheckCircle className="w-2.5 h-2.5" /> : <XCircle className="w-2.5 h-2.5" />}
+                      {execResults[sig.id].message.slice(0, 40)}
+                    </span>
+                  ) : (
+                    <button
+                      disabled={executing === sig.id}
+                      onClick={async () => {
+                        setExecuting(sig.id);
+                        const result = await executeOnDhan(sig);
+                        setExecResults(prev => ({ ...prev, [sig.id]: result }));
+                        setExecuting(null);
+                      }}
+                      className="text-[8px] px-2.5 py-1 rounded-full bg-blue-500/15 text-blue-400 font-bold hover:bg-blue-500/25 disabled:opacity-50 transition flex items-center gap-1">
+                      {executing === sig.id ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Play className="w-2.5 h-2.5" />}
+                      {executing === sig.id ? "Placing…" : "Execute"}
+                    </button>
+                  )
+                )}
+                <button onClick={() => {
+                  if (backtestId === sig.id) { setBacktestId(null); setBacktestResult(null); return; }
+                  setBacktestId(sig.id);
+                  setBacktestLoading(true);
+                  setBacktestResult(null);
+                  setTimeout(() => {
+                    const underlying = sig.symbol.includes("BANKNIFTY") ? "BANKNIFTY" : "NIFTY";
+                    setBacktestResult(runQuickBacktest(sig.strategy, underlying));
+                    setBacktestLoading(false);
+                  }, 600);
+                }}
+                  className="text-[8px] px-2.5 py-1 rounded-full bg-[#BFFF00]/8 text-[#BFFF00] font-bold hover:bg-[#BFFF00]/15 transition flex items-center gap-1">
+                  <FlaskConical className="w-2.5 h-2.5" />
+                  {backtestId === sig.id ? "Hide Backtest" : "Backtest This"}
+                </button>
+              </div>
             </div>
 
             {/* Inline Backtest Results */}

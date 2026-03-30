@@ -73,7 +73,7 @@ export interface NewsItem {
 }
 
 // ── VIEW + PAPER TRADING TYPES ───────────────────────────────
-export type ViewId = "overview" | "vessel-tracker" | "geopolitical" | "whale-trades" | "volume-monitor" | "algo-positions" | "price-charts" | "risk-manager" | "backtester" | "ai-chat" | "heatmap" | "calendar" | "screener" | "forex" | "kite" | "world-indices" | "social-intel" | "news-terminal" | "macro" | "workflows" | "options-chain" | "strategy-backtest" | "algo-signals"
+export type ViewId = "overview" | "vessel-tracker" | "geopolitical" | "whale-trades" | "volume-monitor" | "algo-positions" | "price-charts" | "risk-manager" | "backtester" | "ai-chat" | "heatmap" | "calendar" | "screener" | "forex" | "kite" | "world-indices" | "social-intel" | "news-terminal" | "macro" | "workflows" | "options-chain" | "strategy-backtest" | "algo-signals" | "mirofish" | "options-backtest"
 | "equity-tracker" | "correlation" | "econ-calendar" | "payoff-diagram" | "sector-rotation" | "trade-journal" | "algo-blueprint";
 
 export interface PaperOrder {

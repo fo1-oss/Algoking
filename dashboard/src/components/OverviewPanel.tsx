@@ -23,21 +23,58 @@ export default function OverviewPanel() {
   const [searchResults, setSearchResults] = useState<{ symbol: string; name: string; exchange: string }[]>([]);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [marketViewTab, setMarketViewTab] = useState<"Indices" | "Stocks" | "Commodities">("Indices");
+  const [oiSpurtStocks, setOiSpurtStocks] = useState<{ symbol: string; name: string; ltp: number; change: number; changePct: number; oiChangePct: number }[]>([]);
   const [stockTickers, setStockTickers] = useState<LiveTicker[]>([]);
   const [commodityTickers, setCommodityTickers] = useState<LiveTicker[]>([]);
 
-  // Fetch stocks & commodities data for Market View tabs
+  // Fetch OI Spurt stocks + commodities for Market View tabs
   useEffect(() => {
-    const stockSymbols = "RELIANCE.NS,TCS.NS,HDFCBANK.NS,INFY.NS,ICICIBANK.NS,BHARTIARTL.NS";
     const commoditySymbols = "GC=F,SI=F,CL=F,NG=F,HG=F,PL=F";
 
-    const fetchExtra = async (symbols: string, setter: (t: LiveTicker[]) => void) => {
+    const fetchOISpurt = async () => {
       try {
-        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`, { cache: "no-store" });
+        const res = await fetch("/api/oi-spurt", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.stocks?.length) {
+          setOiSpurtStocks(data.stocks.slice(0, 6));
+          // Also fetch live prices for these stocks
+          const symbols = data.stocks.slice(0, 6).map((s: { symbol: string }) => s.symbol).join(",");
+          if (symbols) {
+            const priceRes = await fetch(`/api/prices?symbols=${encodeURIComponent(symbols)}`, { cache: "no-store" });
+            if (priceRes.ok) {
+              const priceData = await priceRes.json();
+              if (priceData.quotes?.length) {
+                setStockTickers(priceData.quotes.map((q: YFQuote) => ({
+                  symbol: q.symbol, displayName: q.displayName, price: q.price,
+                  change: q.change, changePct: q.changePct, volume: q.volume,
+                  high: q.high, low: q.low, open: q.open, prevClose: q.prevClose, marketState: q.marketState,
+                })));
+              }
+            }
+          }
+        } else {
+          // Fallback to default stocks
+          const fallbackRes = await fetch(`/api/prices?symbols=${encodeURIComponent("RELIANCE.NS,TCS.NS,HDFCBANK.NS,INFY.NS,ICICIBANK.NS,BHARTIARTL.NS")}`, { cache: "no-store" });
+          if (fallbackRes.ok) {
+            const d = await fallbackRes.json();
+            if (d.quotes?.length) setStockTickers(d.quotes.map((q: YFQuote) => ({
+              symbol: q.symbol, displayName: q.displayName, price: q.price,
+              change: q.change, changePct: q.changePct, volume: q.volume,
+              high: q.high, low: q.low, open: q.open, prevClose: q.prevClose, marketState: q.marketState,
+            })));
+          }
+        }
+      } catch { /* noop */ }
+    };
+
+    const fetchCommodities = async () => {
+      try {
+        const res = await fetch(`/api/prices?symbols=${encodeURIComponent(commoditySymbols)}`, { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
         if (data.quotes?.length) {
-          setter(data.quotes.map((q: YFQuote) => ({
+          setCommodityTickers(data.quotes.map((q: YFQuote) => ({
             symbol: q.symbol, displayName: q.displayName, price: q.price,
             change: q.change, changePct: q.changePct, volume: q.volume,
             high: q.high, low: q.low, open: q.open, prevClose: q.prevClose, marketState: q.marketState,
@@ -46,12 +83,9 @@ export default function OverviewPanel() {
       } catch { /* noop */ }
     };
 
-    fetchExtra(stockSymbols, setStockTickers);
-    fetchExtra(commoditySymbols, setCommodityTickers);
-    const id = setInterval(() => {
-      fetchExtra(stockSymbols, setStockTickers);
-      fetchExtra(commoditySymbols, setCommodityTickers);
-    }, 5000);
+    fetchOISpurt();
+    fetchCommodities();
+    const id = setInterval(() => { fetchOISpurt(); fetchCommodities(); }, 10000);
     return () => clearInterval(id);
   }, []);
 
@@ -309,7 +343,10 @@ export default function OverviewPanel() {
       {/* ═══ MARKET VIEW — Watchlist style ═══ */}
       <div className="glass-card p-5">
         <div className="flex items-center justify-between mb-4">
-          <span className="text-[14px] font-bold text-white">Market View</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[14px] font-bold text-white">Market View</span>
+            {marketViewTab === "Stocks" && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 font-bold">OI SPURT</span>}
+          </div>
           <div className="flex items-center gap-1">
             {(["Indices", "Stocks", "Commodities"] as const).map((t) => (
               <span key={t} onClick={() => setMarketViewTab(t)} className={`text-[10px] px-3 py-1.5 rounded-full font-semibold cursor-pointer transition ${marketViewTab === t ? "bg-[#BFFF00]/10 text-[#BFFF00]" : "text-[#888] hover:text-[#aaa]"}`}>{t}</span>
@@ -324,14 +361,23 @@ export default function OverviewPanel() {
             { label: "CRUDE OIL", flag: "🛢️", data: crude },
             { label: "GOLD", flag: "🥇", data: gold },
             { label: "BITCOIN", flag: "₿", data: btc },
-          ] : marketViewTab === "Stocks" ? [
-            { label: "RELIANCE", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "RELIANCE.NS") },
-            { label: "TCS", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "TCS.NS") },
-            { label: "HDFC BANK", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "HDFCBANK.NS") },
-            { label: "INFOSYS", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "INFY.NS") },
-            { label: "ICICI BANK", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "ICICIBANK.NS") },
-            { label: "BHARTI AIRTEL", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "BHARTIARTL.NS") },
-          ] : [
+          ] : marketViewTab === "Stocks" ? (
+            oiSpurtStocks.length > 0
+              ? oiSpurtStocks.map(s => ({
+                  label: s.name.replace(/ Limited| Ltd\.?/g, "").toUpperCase(),
+                  flag: "🇮🇳",
+                  data: stockTickers.find(t => t.symbol === s.symbol) || { price: s.ltp, change: s.change, changePct: s.changePct, symbol: s.symbol, displayName: s.name, volume: "", high: 0, low: 0, open: 0, prevClose: 0, marketState: "" },
+                  oiChangePct: s.oiChangePct,
+                }))
+              : [
+                  { label: "RELIANCE", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "RELIANCE.NS") },
+                  { label: "TCS", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "TCS.NS") },
+                  { label: "HDFC BANK", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "HDFCBANK.NS") },
+                  { label: "INFOSYS", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "INFY.NS") },
+                  { label: "ICICI BANK", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "ICICIBANK.NS") },
+                  { label: "BHARTI AIRTEL", flag: "🇮🇳", data: stockTickers.find(t => t.symbol === "BHARTIARTL.NS") },
+                ]
+          ) : [
             { label: "GOLD", flag: "🥇", data: commodityTickers.find(t => t.symbol === "GC=F") },
             { label: "SILVER", flag: "🥈", data: commodityTickers.find(t => t.symbol === "SI=F") },
             { label: "CRUDE OIL", flag: "🛢️", data: commodityTickers.find(t => t.symbol === "CL=F") },

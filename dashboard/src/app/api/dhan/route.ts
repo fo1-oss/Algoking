@@ -4,9 +4,17 @@ export const dynamic = "force-dynamic";
 
 const DHAN_BASE = "https://api.dhan.co/v2";
 
-// In-memory token storage (same pattern as Kite route)
-let dhanAccessToken: string | null = process.env.DHAN_ACCESS_TOKEN || null;
-let dhanClientId: string | null = process.env.DHAN_CLIENT_ID || null;
+// In-memory token storage — always falls back to env vars so serverless cold
+// starts on different instances don't lose the token between requests.
+let _dhanAccessToken: string | null = null;
+let _dhanClientId: string | null = null;
+
+function getToken() { return (_dhanAccessToken || process.env.DHAN_ACCESS_TOKEN || "").trim() || null; }
+function getClientId() { return (_dhanClientId || process.env.DHAN_CLIENT_ID || "").trim() || null; }
+
+// keep legacy names for set-token / disconnect actions
+let dhanAccessToken: string | null = null;
+let dhanClientId: string | null = null;
 
 // ── Dhan API request helper ──────────────────────────────────────────────
 
@@ -15,12 +23,13 @@ async function dhanRequest(
   method: string = "GET",
   body?: Record<string, unknown>
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
-  if (!dhanAccessToken) {
+  const tok = getToken();
+  if (!tok) {
     return { ok: false, status: 401, data: { error: "Not connected. Set Dhan access token first." } };
   }
 
   const headers: Record<string, string> = {
-    "access-token": dhanAccessToken,
+    "access-token": tok,
     "Content-Type": "application/json",
     "Accept": "application/json",
   };
@@ -53,7 +62,9 @@ async function dhanDataRequest(
   path: string,
   body: unknown
 ): Promise<{ ok: boolean; status: number; data: unknown }> {
-  if (!dhanAccessToken || !dhanClientId) {
+  const tok = getToken();
+  const cid = getClientId();
+  if (!tok || !cid) {
     return { ok: false, status: 401, data: { error: "Not connected" } };
   }
 
@@ -61,8 +72,8 @@ async function dhanDataRequest(
     const res = await fetch(`${DHAN_BASE}${path}`, {
       method: "POST",
       headers: {
-        "access-token": dhanAccessToken,
-        "client-id": dhanClientId,
+        "access-token": tok,
+        "client-id": cid,
         "Content-Type": "application/json",
         "Accept": "application/json",
       },
@@ -89,9 +100,10 @@ export async function GET(req: NextRequest) {
   try {
     switch (action) {
       case "status": {
+        const tok = getToken();
         return NextResponse.json({
-          connected: !!dhanAccessToken,
-          clientId: dhanClientId,
+          connected: !!tok,
+          clientId: getClientId(),
           broker: "dhan",
         });
       }
@@ -150,6 +162,8 @@ export async function POST(req: NextRequest) {
         if (!accessToken || !clientId) {
           return NextResponse.json({ error: "accessToken and clientId required" }, { status: 400 });
         }
+        _dhanAccessToken = accessToken;
+        _dhanClientId = clientId;
         dhanAccessToken = accessToken;
         dhanClientId = clientId;
 
@@ -159,6 +173,8 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ connected: true, clientId, message: "Dhan connected successfully" });
         }
         // Reset on failure
+        _dhanAccessToken = null;
+        _dhanClientId = null;
         dhanAccessToken = null;
         dhanClientId = null;
         return NextResponse.json({ connected: false, error: "Invalid token or clientId", details: verify.data }, { status: 401 });
@@ -166,6 +182,8 @@ export async function POST(req: NextRequest) {
 
       // ── Disconnect ──
       case "disconnect": {
+        _dhanAccessToken = null;
+        _dhanClientId = null;
         dhanAccessToken = null;
         dhanClientId = null;
         return NextResponse.json({ connected: false, message: "Dhan disconnected" });
@@ -173,10 +191,10 @@ export async function POST(req: NextRequest) {
 
       // ── Place order ──
       case "place-order": {
-        if (!dhanClientId) return NextResponse.json({ error: "Not connected" }, { status: 401 });
+        if (!getClientId()) return NextResponse.json({ error: "Not connected" }, { status: 401 });
 
         const order = {
-          dhanClientId,
+          dhanClientId: getClientId()!,
           correlationId: body.correlationId || `wf_${Date.now()}`,
           transactionType: body.transactionType || "BUY", // BUY | SELL
           exchangeSegment: body.exchangeSegment || "NSE_FNO", // NSE_EQ | NSE_FNO | BSE_EQ | MCX_COMM
@@ -209,10 +227,10 @@ export async function POST(req: NextRequest) {
 
       // ── Place Super Order (entry + target + SL + trailing in one) ──
       case "place-super-order": {
-        if (!dhanClientId) return NextResponse.json({ error: "Not connected" }, { status: 401 });
+        if (!getClientId()) return NextResponse.json({ error: "Not connected" }, { status: 401 });
 
         const superOrder = {
-          dhanClientId,
+          dhanClientId: getClientId()!,
           correlationId: body.correlationId || `super_${Date.now()}`,
           transactionType: body.transactionType || "BUY",
           exchangeSegment: body.exchangeSegment || "NSE_FNO",
@@ -242,12 +260,12 @@ export async function POST(req: NextRequest) {
 
       // ── Modify Super Order (entry/target/SL legs independently) ──
       case "modify-super-order": {
-        if (!dhanClientId) return NextResponse.json({ error: "Not connected" }, { status: 401 });
+        if (!getClientId()) return NextResponse.json({ error: "Not connected" }, { status: 401 });
         const superOrderId = body.orderId;
         if (!superOrderId) return NextResponse.json({ error: "orderId required" }, { status: 400 });
 
         const modSuperBody: Record<string, unknown> = {
-          dhanClientId,
+          dhanClientId: getClientId()!,
           orderId: superOrderId,
           legName: body.legName || "ENTRY_LEG", // ENTRY_LEG | TARGET_LEG | STOP_LOSS_LEG
         };
@@ -283,12 +301,12 @@ export async function POST(req: NextRequest) {
 
       // ── Modify order ──
       case "modify-order": {
-        if (!dhanClientId) return NextResponse.json({ error: "Not connected" }, { status: 401 });
+        if (!getClientId()) return NextResponse.json({ error: "Not connected" }, { status: 401 });
         const { orderId, ...modifications } = body;
         if (!orderId) return NextResponse.json({ error: "orderId required" }, { status: 400 });
 
         const modBody = {
-          dhanClientId,
+          dhanClientId: getClientId()!,
           orderId,
           orderType: modifications.orderType || "LIMIT",
           quantity: modifications.quantity ? String(modifications.quantity) : undefined,
@@ -303,7 +321,7 @@ export async function POST(req: NextRequest) {
 
       // ── Cancel order ──
       case "cancel-order": {
-        if (!dhanClientId) return NextResponse.json({ error: "Not connected" }, { status: 401 });
+        if (!getClientId()) return NextResponse.json({ error: "Not connected" }, { status: 401 });
         const cancelOrderId = body.orderId;
         if (!cancelOrderId) return NextResponse.json({ error: "orderId required" }, { status: 400 });
 
@@ -313,7 +331,7 @@ export async function POST(req: NextRequest) {
 
       // ── Square off all positions ──
       case "square-off-all": {
-        if (!dhanClientId) return NextResponse.json({ error: "Not connected" }, { status: 401 });
+        if (!getClientId()) return NextResponse.json({ error: "Not connected" }, { status: 401 });
 
         // Get all open positions
         const posResult = await dhanRequest("/positions");
@@ -328,7 +346,7 @@ export async function POST(req: NextRequest) {
 
         for (const pos of openPositions) {
           const exitOrder = {
-            dhanClientId,
+            dhanClientId: getClientId()!,
             correlationId: `sqoff_${Date.now()}_${pos.securityId}`,
             transactionType: pos.netQty > 0 ? "SELL" : "BUY",
             exchangeSegment: pos.exchangeSegment || "NSE_FNO",
