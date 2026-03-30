@@ -165,7 +165,7 @@ async function fetchMarketContext(userMessage: string): Promise<string> {
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages } = await req.json();
+    const { messages, systemOverride } = await req.json();
     const apiKey = process.env.ANTHROPIC_API_KEY;
 
     if (!apiKey) {
@@ -219,7 +219,7 @@ ${marketCtx}`;
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2048,
-        system: systemPrompt,
+        system: systemOverride || systemPrompt,
         messages: messages.map((m: { role: string; content: string }) => ({
           role: m.role,
           content: m.content,
