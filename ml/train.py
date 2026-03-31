@@ -289,17 +289,31 @@ def predict(features_dict: dict) -> dict:
     lgb_proba = lgb.predict_proba(X)[0]
     ensemble_proba = (xgb_proba + lgb_proba) / 2
 
-    pred_class = int(ensemble_proba.argmax())
-    class_map = {0: "SHORT", 1: "NEUTRAL", 2: "LONG"}
-    confidence = float(ensemble_proba.max())
+    p_short = float(ensemble_proba[0])
+    p_neutral = float(ensemble_proba[1])
+    p_long = float(ensemble_proba[2])
+
+    long_edge = p_long - p_short
+    EDGE_THRESHOLD = 0.05
+
+    if long_edge > EDGE_THRESHOLD:
+        direction = "LONG"
+        confidence = p_long
+    elif long_edge < -EDGE_THRESHOLD:
+        direction = "SHORT"
+        confidence = p_short
+    else:
+        direction = "NEUTRAL"
+        confidence = p_neutral
 
     return {
-        "direction": class_map[pred_class],
+        "direction": direction,
         "confidence": round(confidence, 4),
+        "long_edge": round(long_edge, 4),
         "probabilities": {
-            "SHORT": round(float(ensemble_proba[0]), 4),
-            "NEUTRAL": round(float(ensemble_proba[1]), 4),
-            "LONG": round(float(ensemble_proba[2]), 4),
+            "SHORT": round(p_short, 4),
+            "NEUTRAL": round(p_neutral, 4),
+            "LONG": round(p_long, 4),
         },
         "model_version": meta.get("trained_at", "unknown"),
     }
@@ -336,20 +350,57 @@ def batch_predict(symbols: list = None) -> dict:
             lgb_proba = lgb.predict_proba(X)[0]
             ensemble_proba = (xgb_proba + lgb_proba) / 2
 
-            pred_class = int(ensemble_proba.argmax())
-            class_map = {0: "SHORT", 1: "NEUTRAL", 2: "LONG"}
+            p_short = float(ensemble_proba[0])
+            p_neutral = float(ensemble_proba[1])
+            p_long = float(ensemble_proba[2])
+
+            # Directional signal: compare LONG vs SHORT probability
+            # Use net directional strength rather than argmax
+            long_edge = p_long - p_short
+            EDGE_THRESHOLD = 0.05  # 5% edge needed for directional call
+
+            if long_edge > EDGE_THRESHOLD:
+                direction = "LONG"
+                confidence = p_long
+            elif long_edge < -EDGE_THRESHOLD:
+                direction = "SHORT"
+                confidence = p_short
+            else:
+                direction = "NEUTRAL"
+                confidence = p_neutral
 
             predictions[sym] = {
-                "direction": class_map[pred_class],
-                "confidence": round(float(ensemble_proba.max()), 4),
-                "prob_short": round(float(ensemble_proba[0]), 4),
-                "prob_neutral": round(float(ensemble_proba[1]), 4),
-                "prob_long": round(float(ensemble_proba[2]), 4),
+                "direction": direction,
+                "confidence": round(confidence, 4),
+                "prob_short": round(p_short, 4),
+                "prob_neutral": round(p_neutral, 4),
+                "prob_long": round(p_long, 4),
+                "long_edge": round(long_edge, 4),
             }
         except Exception:
             pass
 
     conn.close()
+
+    # Rank-based directional signals using long_edge distribution
+    if predictions:
+        edges = [p["long_edge"] for p in predictions.values()]
+        if edges:
+            edge_mean = np.mean(edges)
+            edge_std = np.std(edges) if len(edges) > 1 else 0.01
+            # Z-score each edge; top/bottom 20% get directional signals
+            for sym, pred in predictions.items():
+                z = (pred["long_edge"] - edge_mean) / max(edge_std, 0.001)
+                if z > 0.8:  # top ~20%
+                    pred["direction"] = "LONG"
+                    pred["confidence"] = round(min(0.5 + abs(z) * 0.15, 0.95), 4)
+                elif z < -0.8:  # bottom ~20%
+                    pred["direction"] = "SHORT"
+                    pred["confidence"] = round(min(0.5 + abs(z) * 0.15, 0.95), 4)
+                else:
+                    pred["direction"] = "NEUTRAL"
+                    pred["confidence"] = round(pred["prob_neutral"], 4)
+                pred["edge_zscore"] = round(z, 4)
 
     # Save predictions
     pred_path = os.path.join(MODEL_DIR, "latest_predictions.json")

@@ -1,0 +1,109 @@
+{
+  "summary": {
+    "folds": 10,
+    "avg_accuracy": 0.44959000000000005,
+    "avg_f1": 0.39489
+  },
+  "folds": [
+    {
+      "fold": 1,
+      "train_end": "2025-05-02",
+      "test_start": "2025-05-05",
+      "test_end": "2025-06-02",
+      "train_size": 206850,
+      "test_size": 4452,
+      "accuracy": 0.5038,
+      "f1_weighted": 0.4654
+    },
+    {
+      "fold": 2,
+      "train_end": "2025-06-02",
+      "test_start": "2025-06-03",
+      "test_end": "2025-07-01",
+      "train_size": 211302,
+      "test_size": 4452,
+      "accuracy": 0.5537,
+      "f1_weighted": 0.5041
+    },
+    {
+      "fold": 3,
+      "train_end": "2025-07-01",
+      "test_start": "2025-07-02",
+      "test_end": "2025-07-30",
+      "train_size": 215754,
+      "test_size": 4452,
+      "accuracy": 0.3106,
+      "f1_weighted": 0.2343
+    },
+    {
+      "fold": 4,
+      "train_end": "2025-07-30",
+      "test_start": "2025-07-31",
+      "test_end": "2025-09-01",
+      "train_size": 220206,
+      "test_size": 4452,
+      "accuracy": 0.4921,
+      "f1_weighted": 0.4284
+    },
+    {
+      "fold": 5,
+      "train_end": "2025-09-01",
+      "test_start": "2025-09-02",
+      "test_end": "2025-09-30",
+      "train_size": 224658,
+      "test_size": 4452,
+      "accuracy": 0.5458,
+      "f1_weighted": 0.5065
+    },
+    {
+      "fold": 6,
+      "train_end": "2025-09-30",
+      "test_start": "2025-10-01",
+      "test_end": "2025-10-31",
+      "train_size": 229110,
+      "test_size": 4452,
+      "accuracy": 0.4488,
+      "f1_weighted": 0.358
+    },
+    {
+      "fold": 7,
+      "train_end": "2025-10-31",
+      "test_start": "2025-11-03",
+      "test_end": "2025-12-02",
+      "train_size": 233562,
+      "test_size": 4452,
+      "accuracy": 0.4277,
+      "f1_weighted": 0.3284
+    },
+    {
+      "fold": 8,
+      "train_end": "2025-12-02",
+      "test_start": "2025-12-03",
+      "test_end": "2026-01-01",
+      "train_size": 238014,
+      "test_size": 4450,
+      "accuracy": 0.3847,
+      "f1_weighted": 0.3352
+    },
+    {
+      "fold": 9,
+      "train_end": "2026-01-01",
+      "test_start": "2026-01-02",
+      "test_end": "2026-02-02",
+      "train_size": 242464,
+      "test_size": 4433,
+      "accuracy": 0.4302,
+      "f1_weighted": 0.4098
+    },
+    {
+      "fold": 10,
+      "train_end": "2026-02-02",
+      "test_start": "2026-02-03",
+      "test_end": "2026-03-04",
+      "train_size": 246897,
+      "test_size": 4452,
+      "accuracy": 0.3985,
+      "f1_weighted": 0.3788
+    }
+  ]
+}

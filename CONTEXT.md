@@ -100,24 +100,15 @@ Dhan token expires daily. Delta Exchange uses HMAC-SHA256: `method + timestamp +
 
 ## WHAT NEEDS TO BE DONE NEXT
 
-### Priority 1: Wire India Scanner to Dhan API (NOT Yahoo)
-The India scanner currently uses Yahoo Finance for quotes. User wants Dhan's own data APIs:
-- `POST /v2/marketfeed/ltp` — batch LTP for all 209 F&O stocks
-- `POST /v2/marketfeed/ohlc` — batch OHLC with volume
-- `POST /v2/marketfeed/quote` — market depth + OI
-- `POST /v2/optionchain` — full chain with Greeks, OI, security IDs per strike
-- `POST /v2/optionchain/expirylist` — available expiry dates
-- `POST /v2/charts/intraday` — intraday candles for RSI/SMA
-
-All these Dhan APIs are **tested and working** from this session. Headers needed:
-```
-access-token: <JWT token>
-client-id: 1105206730
-Content-Type: application/json
-```
-
-Dhan security IDs for indices: NIFTY=13 (IDX_I segment), BANKNIFTY=25
-Dhan security IDs for stocks: found via option chain response (e.g., NIFTY 22350 CE = 40726)
+### Priority 1: ✅ DONE — India Scanner v3 wired to Dhan API
+Completed 2026-03-31. Scanner now uses Dhan API for all 209 F&O stocks:
+- Batch Dhan LTP + OHLC for all 209 stocks (100/batch)
+- Dhan option chain for top 15 movers → OI, IV, Greeks, PCR
+- 6-layer scoring: StatArb (IV vs realized vol), MeanRev (RSI + Z-score), Momentum, VolArb, Flow, OI/Greeks
+- Auto-execute via Dhan Super Orders (3x TP, 30% SL, trailing stop, Half-Kelly sizing)
+- `dhan-scrip-cache.ts` maps symbols → security IDs via scrip master CSV (cached 24h)
+- Falls back to Yahoo if Dhan not connected
+- Crypto algo features ported: Z-score, realized vol, IV ratio, position sizing
 
 ### Priority 2: Dhan token expires every 24 hours
 User updates manually each morning. When token is set via `POST /api/dhan {action: "set-token"}`, it auto-triggers the India scanner and sends Telegram alert.

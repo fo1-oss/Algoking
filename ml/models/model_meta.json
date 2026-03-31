@@ -1,0 +1,224 @@
+{
+  "trained_at": "2026-03-31T16:48:05.908745",
+  "samples": 254953,
+  "features": 88,
+  "feature_columns": [
+    "return_1d",
+    "return_5d",
+    "return_10d",
+    "return_20d",
+    "return_60d",
+    "log_return_1d",
+    "gap_pct",
+    "intraday_range",
+    "upper_shadow",
+    "lower_shadow",
+    "sma_5_ratio",
+    "sma_10_ratio",
+    "sma_20_ratio",
+    "sma_50_ratio",
+    "sma_100_ratio",
+    "sma_200_ratio",
+    "ema_9_ratio",
+    "ema_21_ratio",
+    "sma20_sma50_ratio",
+    "sma50_sma200_ratio",
+    "pct_from_52w_high",
+    "pct_from_52w_low",
+    "rsi_14",
+    "rsi_7",
+    "macd_signal_diff",
+    "macd_histogram",
+    "stochastic_k",
+    "stochastic_d",
+    "roc_10",
+    "cci_20",
+    "williams_r",
+    "momentum_10",
+    "atr_14",
+    "atr_ratio",
+    "bb_width",
+    "bb_position",
+    "hist_vol_20d",
+    "hist_vol_60d",
+    "vol_ratio_20_60",
+    "true_range_pct",
+    "avg_range_5d",
+    "vol_expansion",
+    "volume_ratio_20d",
+    "volume_sma10_ratio",
+    "obv_slope_10d",
+    "volume_price_trend",
+    "mfi_14",
+    "volume_change_5d",
+    "buy_volume_pct",
+    "volume_trend_20d",
+    "oi",
+    "oi_change_1d",
+    "oi_change_pct",
+    "oi_change_5d",
+    "oi_price_divergence",
+    "pcr",
+    "pcr_change_5d",
+    "atm_iv",
+    "iv_change_5d",
+    "max_ce_oi_dist",
+    "max_pe_oi_dist",
+    "iv_percentile_30d",
+    "vix_level",
+    "vix_change_1d",
+    "vix_percentile_30d",
+    "nifty_return_1d",
+    "nifty_rsi",
+    "corr_nifty_20d",
+    "sector_return",
+    "sector_breadth",
+    "day_of_week",
+    "month",
+    "is_monday",
+    "is_friday",
+    "is_month_end",
+    "is_month_start",
+    "day_of_month",
+    "days_to_month_end",
+    "consecutive_up_days",
+    "consecutive_down_days",
+    "inside_bar",
+    "engulfing",
+    "doji",
+    "rsi_x_volume",
+    "trend_alignment",
+    "volatility_regime",
+    "mean_reversion_score",
+    "adx_trend"
+  ],
+  "class_map": {
+    "0": "SHORT",
+    "1": "NEUTRAL",
+    "2": "LONG"
+  },
+  "top_30_features": [
+    {
+      "name": "vix_level",
+      "importance": 1651.0178
+    },
+    {
+      "name": "nifty_rsi",
+      "importance": 1382.017
+    },
+    {
+      "name": "nifty_return_1d",
+      "importance": 954.0139
+    },
+    {
+      "name": "vix_change_1d",
+      "importance": 953.514
+    },
+    {
+      "name": "month",
+      "importance": 945.0245
+    },
+    {
+      "name": "day_of_month",
+      "importance": 794.0219
+    },
+    {
+      "name": "vix_percentile_30d",
+      "importance": 743.5191
+    },
+    {
+      "name": "atr_14",
+      "importance": 685.0057
+    },
+    {
+      "name": "volume_price_trend",
+      "importance": 629.5053
+    },
+    {
+      "name": "days_to_month_end",
+      "importance": 537.5208
+    },
+    {
+      "name": "corr_nifty_20d",
+      "importance": 508.0052
+    },
+    {
+      "name": "hist_vol_60d",
+      "importance": 463.0085
+    },
+    {
+      "name": "sma50_sma200_ratio",
+      "importance": 421.0063
+    },
+    {
+      "name": "pct_from_52w_low",
+      "importance": 407.006
+    },
+    {
+      "name": "sma20_sma50_ratio",
+      "importance": 384.5053
+    },
+    {
+      "name": "adx_trend",
+      "importance": 371.0045
+    },
+    {
+      "name": "atr_ratio",
+      "importance": 365.0063
+    },
+    {
+      "name": "vol_expansion",
+      "importance": 363.0051
+    },
+    {
+      "name": "avg_range_5d",
+      "importance": 357.5063
+    },
+    {
+      "name": "pct_from_52w_high",
+      "importance": 353.5061
+    },
+    {
+      "name": "sma_100_ratio",
+      "importance": 348.0062
+    },
+    {
+      "name": "return_60d",
+      "importance": 343.0051
+    },
+    {
+      "name": "volume_trend_20d",
+      "importance": 333.0043
+    },
+    {
+      "name": "hist_vol_20d",
+      "importance": 329.5047
+    },
+    {
+      "name": "bb_width",
+      "importance": 325.5047
+    },
+    {
+      "name": "sector_return",
+      "importance": 314.0048
+    },
+    {
+      "name": "macd_signal_diff",
+      "importance": 310.0049
+    },
+    {
+      "name": "obv_slope_10d",
+      "importance": 304.0042
+    },
+    {
+      "name": "sma_200_ratio",
+      "importance": 301.5059
+    },
+    {
+      "name": "vol_ratio_20_60",
+      "importance": 297.5045
+    }
+  ],
+  "xgb_path": "/Users/kunaalxg_/Desktop/Trading Algo/ml/models/xgb_direction.joblib",
+  "lgb_path": "/Users/kunaalxg_/Desktop/Trading Algo/ml/models/lgb_direction.joblib"
+}
