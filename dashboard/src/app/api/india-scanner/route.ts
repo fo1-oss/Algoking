@@ -3,38 +3,75 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
-const TELEGRAM_BOT = "8440970690:AAFOHoVTCw6Gyx4Mla7Q4pOUnfzeb8fDDoE";
-const TELEGRAM_CHAT = "6776228988";
-const DHAN_BASE = "https://api.dhan.co/v2";
+const TG_BOT = "8440970690:AAFOHoVTCw6Gyx4Mla7Q4pOUnfzeb8fDDoE";
+const TG_CHAT = "6776228988";
 
-// ── In-memory state (set via /api/dhan set-token) ──
-// We read from the dhan route's stored token by calling our own API
-async function getDhanCreds(): Promise<{ token: string; clientId: string } | null> {
-  try {
-    const bases = ["http://localhost:3000", "https://algomaster-pro.vercel.app"];
-    for (const base of bases) {
-      try {
-        const res = await fetch(`${base}/api/dhan?action=status`, { cache: "no-store" });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.connected) return { token: data._token || "", clientId: data.clientId };
-        }
-      } catch { /* try next */ }
-    }
-  } catch { /* */ }
-  return null;
-}
+// ── In-memory: track alerted signals to avoid repeats ──
+const alertedSignals = new Map<string, number>(); // key → timestamp
+const ALERT_COOLDOWN = 3600000; // 1 hour cooldown per signal
+
+// ── All F&O instruments ──
+const INSTRUMENTS: Record<string, { yahoo: string; lot: number; step: number; type: "index" | "stock" }> = {
+  "NIFTY": { yahoo: "%5ENSEI", lot: 25, step: 50, type: "index" },
+  "BANKNIFTY": { yahoo: "%5ENSEBANK", lot: 15, step: 100, type: "index" },
+  "RELIANCE": { yahoo: "RELIANCE.NS", lot: 250, step: 20, type: "stock" },
+  "TCS": { yahoo: "TCS.NS", lot: 175, step: 20, type: "stock" },
+  "HDFCBANK": { yahoo: "HDFCBANK.NS", lot: 550, step: 10, type: "stock" },
+  "INFY": { yahoo: "INFY.NS", lot: 400, step: 20, type: "stock" },
+  "ICICIBANK": { yahoo: "ICICIBANK.NS", lot: 700, step: 20, type: "stock" },
+  "SBIN": { yahoo: "SBIN.NS", lot: 750, step: 10, type: "stock" },
+  "BAJFINANCE": { yahoo: "BAJFINANCE.NS", lot: 125, step: 20, type: "stock" },
+  "BHARTIARTL": { yahoo: "BHARTIARTL.NS", lot: 475, step: 20, type: "stock" },
+  "ITC": { yahoo: "ITC.NS", lot: 1600, step: 5, type: "stock" },
+  "KOTAKBANK": { yahoo: "KOTAKBANK.NS", lot: 400, step: 10, type: "stock" },
+  "LT": { yahoo: "LT.NS", lot: 150, step: 20, type: "stock" },
+  "AXISBANK": { yahoo: "AXISBANK.NS", lot: 625, step: 10, type: "stock" },
+  "TATAMOTORS": { yahoo: "TATAMOTORS.NS", lot: 575, step: 5, type: "stock" },
+  "SUNPHARMA": { yahoo: "SUNPHARMA.NS", lot: 700, step: 10, type: "stock" },
+  "TATASTEEL": { yahoo: "TATASTEEL.NS", lot: 5500, step: 2, type: "stock" },
+  "WIPRO": { yahoo: "WIPRO.NS", lot: 1500, step: 5, type: "stock" },
+  "HCLTECH": { yahoo: "HCLTECH.NS", lot: 350, step: 20, type: "stock" },
+  "ADANIENT": { yahoo: "ADANIENT.NS", lot: 500, step: 20, type: "stock" },
+  "HINDUNILVR": { yahoo: "HINDUNILVR.NS", lot: 300, step: 20, type: "stock" },
+  "COALINDIA": { yahoo: "COALINDIA.NS", lot: 2100, step: 5, type: "stock" },
+  "ONGC": { yahoo: "ONGC.NS", lot: 3250, step: 5, type: "stock" },
+  "NTPC": { yahoo: "NTPC.NS", lot: 2025, step: 5, type: "stock" },
+  "MARUTI": { yahoo: "MARUTI.NS", lot: 100, step: 100, type: "stock" },
+};
 
 // ── Helpers ──
 async function sendTg(text: string) {
-  await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: TELEGRAM_CHAT, text, parse_mode: "Markdown", disable_web_page_preview: true }),
+  await fetch(`https://api.telegram.org/bot${TG_BOT}/sendMessage`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: "Markdown", disable_web_page_preview: true }),
   }).catch(() => {});
 }
 
-async function fetchYahooCandles(symbol: string, range = "1mo", interval = "1h"): Promise<number[]> {
+async function fetchYahoo(symbols: string[]): Promise<Record<string, { price: number; change: number; changePct: number; high: number; low: number; prevClose: number; volume: number; avgVolume: number }>> {
+  const result: Record<string, ReturnType<typeof Object>> = {};
+  try {
+    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(",")}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose,regularMarketVolume,averageDailyVolume3Month`;
+    const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" });
+    if (!res.ok) return result;
+    const data = await res.json();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const q of (data?.quoteResponse?.result || []) as any[]) {
+      result[q.symbol] = {
+        price: q.regularMarketPrice || 0,
+        change: q.regularMarketChange || 0,
+        changePct: q.regularMarketChangePercent || 0,
+        high: q.regularMarketDayHigh || 0,
+        low: q.regularMarketDayLow || 0,
+        prevClose: q.regularMarketPreviousClose || 0,
+        volume: q.regularMarketVolume || 0,
+        avgVolume: q.averageDailyVolume3Month || 1,
+      };
+    }
+  } catch { /* */ }
+  return result;
+}
+
+async function fetchCandles(symbol: string, range = "5d", interval = "15m"): Promise<number[]> {
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" });
@@ -44,70 +81,42 @@ async function fetchYahooCandles(symbol: string, range = "1mo", interval = "1h")
   } catch { return []; }
 }
 
-// ── Technical indicators ──
 function calcRSI(closes: number[], period = 14): number {
   if (closes.length < period + 1) return 50;
-  const deltas = closes.slice(-period - 1).map((c, i, a) => i > 0 ? c - a[i - 1] : 0).slice(1);
-  const gains = deltas.filter(d => d > 0);
-  const losses = deltas.filter(d => d < 0).map(d => Math.abs(d));
-  const avgGain = gains.length > 0 ? gains.reduce((s, g) => s + g, 0) / period : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((s, l) => s + l, 0) / period : 0.01;
-  return 100 - (100 / (1 + avgGain / avgLoss));
+  const d = closes.slice(-period - 1).map((c, i, a) => i > 0 ? c - a[i - 1] : 0).slice(1);
+  const g = d.filter(x => x > 0); const l = d.filter(x => x < 0).map(x => -x);
+  const ag = g.length > 0 ? g.reduce((s, x) => s + x, 0) / period : 0;
+  const al = l.length > 0 ? l.reduce((s, x) => s + x, 0) / period : 0.01;
+  return 100 - (100 / (1 + ag / al));
 }
 
-function calcSMA(closes: number[], period: number): number {
-  if (closes.length < period) return closes[closes.length - 1] || 0;
-  return closes.slice(-period).reduce((s, c) => s + c, 0) / period;
+function calcSMA(c: number[], p: number): number {
+  if (c.length < p) return c[c.length - 1] || 0;
+  return c.slice(-p).reduce((s, x) => s + x, 0) / p;
 }
 
-function calcZScore(closes: number[], period = 20): number {
-  if (closes.length < period) return 0;
-  const slice = closes.slice(-period);
-  const mean = slice.reduce((s, c) => s + c, 0) / period;
-  const std = Math.sqrt(slice.reduce((s, c) => s + (c - mean) ** 2, 0) / period);
-  return std > 0 ? (closes[closes.length - 1] - mean) / std : 0;
+function isMarketHours(): boolean {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const h = ist.getHours(), m = ist.getMinutes(), tm = h * 60 + m, day = ist.getDay();
+  return day >= 1 && day <= 5 && tm >= 555 && tm <= 930; // 9:15 - 15:30
 }
 
-function calcATR(highs: number[], lows: number[], closes: number[], period = 14): number {
-  if (highs.length < period + 1) return 0;
-  const trs: number[] = [];
-  for (let i = 1; i < highs.length; i++) {
-    trs.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
-  }
-  return trs.slice(-period).reduce((s, t) => s + t, 0) / period;
-}
-
-function calcRealizedVol(closes: number[], period = 20): number {
-  if (closes.length < period + 1) return 0;
-  const returns = closes.slice(-period - 1).map((c, i, a) => i > 0 ? Math.log(c / a[i - 1]) : 0).slice(1);
-  const std = Math.sqrt(returns.reduce((s, r) => s + r * r, 0) / returns.length);
-  return std * Math.sqrt(252) * 100;
-}
-
-// ── Types ──
-interface IndianSignal {
+// ── Signal type ──
+interface Signal {
+  name: string;
   instrument: string;
-  securityId: string;
   type: "CE" | "PE";
   strike: number;
-  expiry: string;
-  underlying: string;
   score: number;
   direction: "LONG" | "SHORT";
   reason: string;
   layers: { statArb: number; meanRev: number; momentum: number; volArb: number; flow: number };
-  superOrder: {
-    transactionType: string;
-    exchangeSegment: string;
-    productType: string;
-    orderType: string;
-    securityId: string;
-    quantity: number;
-    price: number;
-    targetPrice: number;
-    stopLossPrice: number;
-    trailingJump: number;
-  };
+  price: number;
+  changePct: number;
+  rsi: number;
+  lotSize: number;
+  estimatedPremium: number;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -118,268 +127,200 @@ export async function GET(req: NextRequest) {
   const action = req.nextUrl.searchParams.get("action") || "scan";
   const autoExecute = req.nextUrl.searchParams.get("auto") === "true";
 
-  if (action !== "scan") {
-    return NextResponse.json({ actions: ["scan"], usage: "/api/india-scanner?action=scan&auto=true" });
-  }
+  if (action !== "scan") return NextResponse.json({ actions: ["scan"] });
 
   try {
-    // ── 1. Fetch NIFTY + BANKNIFTY spot data ──
-    const [niftyCandles, bnCandles, niftyDaily, bnDaily] = await Promise.all([
-      fetchYahooCandles("%5ENSEI", "1mo", "1h"),
-      fetchYahooCandles("%5ENSEBANK", "1mo", "1h"),
-      fetchYahooCandles("%5ENSEI", "6mo", "1d"),
-      fetchYahooCandles("%5ENSEBANK", "6mo", "1d"),
-    ]);
+    // ── 1. Fetch ALL instruments in batch ──
+    const yahooSymbols = Object.values(INSTRUMENTS).map(i => i.yahoo);
+    yahooSymbols.push("%5EINDIAVIX"); // VIX
 
-    const niftyPrice = niftyCandles[niftyCandles.length - 1] || 0;
-    const bnPrice = bnCandles[bnCandles.length - 1] || 0;
+    const quotes = await fetchYahoo(yahooSymbols);
 
-    if (!niftyPrice) return NextResponse.json({ error: "Could not fetch NIFTY data" });
+    // VIX
+    const vixData = quotes["%5EINDIAVIX"] || quotes["^INDIAVIX"];
+    const vixPrice = vixData?.price || 15;
 
-    // ── 2. Calculate technicals ──
-    const niftyRSI = calcRSI(niftyCandles);
-    const bnRSI = calcRSI(bnCandles);
-    const niftySMA20 = calcSMA(niftyDaily, 20);
-    const niftySMA50 = calcSMA(niftyDaily, 50);
-    const bnSMA20 = calcSMA(bnDaily, 20);
-    const bnSMA50 = calcSMA(bnDaily, 50);
-    const niftyZScore = calcZScore(niftyCandles);
-    const bnZScore = calcZScore(bnCandles);
-    const niftyRealVol = calcRealizedVol(niftyDaily);
-    const bnRealVol = calcRealizedVol(bnDaily);
+    // ── 2. Fetch intraday candles for top movers (parallel, max 8 to stay fast) ──
+    // Sort by absolute change % and scan top movers + indices
+    const sortedByMove = Object.entries(INSTRUMENTS)
+      .map(([name, info]) => {
+        const q = quotes[info.yahoo] || quotes[info.yahoo.replace("%5E", "^")];
+        return { name, info, quote: q, absChange: Math.abs(q?.changePct || 0) };
+      })
+      .filter(x => x.quote)
+      .sort((a, b) => b.absChange - a.absChange);
 
-    // Daily change
-    const niftyChange = niftyDaily.length >= 2 ? ((niftyDaily[niftyDaily.length - 1] - niftyDaily[niftyDaily.length - 2]) / niftyDaily[niftyDaily.length - 2]) * 100 : 0;
-    const bnChange = bnDaily.length >= 2 ? ((bnDaily[bnDaily.length - 1] - bnDaily[bnDaily.length - 2]) / bnDaily[bnDaily.length - 2]) * 100 : 0;
+    // Always include indices + top 6 movers
+    const toScan = [
+      ...sortedByMove.filter(x => x.info.type === "index"),
+      ...sortedByMove.filter(x => x.info.type === "stock").slice(0, 6),
+    ];
 
-    // PDC levels
-    const niftyPDC = niftyDaily.length >= 2 ? niftyDaily[niftyDaily.length - 2] : niftyPrice;
-    const bnPDC = bnDaily.length >= 2 ? bnDaily[bnDaily.length - 2] : bnPrice;
+    const candleResults = await Promise.allSettled(
+      toScan.map(x => fetchCandles(x.info.yahoo, "5d", "15m"))
+    );
 
-    // ATM strikes
-    const niftyATM = Math.round(niftyPrice / 50) * 50;
-    const bnATM = Math.round(bnPrice / 100) * 100;
+    // ── 3. Score each instrument ──
+    const allSignals: Signal[] = [];
 
-    // ── 3. India VIX ──
-    let vixPrice = 15;
-    try {
-      const vixCandles = await fetchYahooCandles("%5EINDIAVIX", "5d", "1d");
-      vixPrice = vixCandles[vixCandles.length - 1] || 15;
-    } catch { /* */ }
+    for (let i = 0; i < toScan.length; i++) {
+      const { name, info, quote } = toScan[i];
+      if (!quote || !quote.price) continue;
 
-    // ── 4. Score signals for NIFTY and BANKNIFTY ──
-    const signals: IndianSignal[] = [];
+      const candleRes = candleResults[i];
+      const candles = candleRes.status === "fulfilled" ? (candleRes as PromiseFulfilledResult<number[]>).value : [];
+      const rsi = calcRSI(candles);
+      const sma20 = calcSMA(candles, 20);
+      const sma50 = calcSMA(candles, 50);
+      const price = quote.price;
+      const changePct = quote.changePct;
+      const volRatio = quote.avgVolume > 0 ? quote.volume / quote.avgVolume : 1;
 
-    for (const { name, price, rsi, sma20, sma50, zScore, realVol, change, atm, pdc, lotSize, stepSize } of [
-      { name: "NIFTY", price: niftyPrice, rsi: niftyRSI, sma20: niftySMA20, sma50: niftySMA50, zScore: niftyZScore, realVol: niftyRealVol, change: niftyChange, atm: niftyATM, pdc: niftyPDC, lotSize: 25, stepSize: 50 },
-      { name: "BANKNIFTY", price: bnPrice, rsi: bnRSI, sma20: bnSMA20, sma50: bnSMA50, zScore: bnZScore, realVol: bnRealVol, change: bnChange, atm: bnATM, pdc: bnPDC, lotSize: 15, stepSize: 100 },
-    ]) {
-      const layers = { statArb: 0, meanRev: 0, momentum: 0, volArb: 0, flow: 0 };
+      const layers = { statArb: 0.5, meanRev: 0.4, momentum: 0.3, volArb: 0.5, flow: 0.5 };
       const reasons: string[] = [];
       let direction: "LONG" | "SHORT" = "LONG";
 
-      // Layer 1: Stat Arb — VIX vs realized vol
-      if (vixPrice > 0 && realVol > 0) {
-        const ratio = vixPrice / (realVol / 100 * 15); // Rough IV proxy
-        if (ratio < 0.8) { layers.statArb = 0.8; reasons.push("IV cheap vs realized"); }
-        else if (ratio > 1.3) { layers.statArb = 0.3; reasons.push("IV expensive"); }
-        else { layers.statArb = 0.5; }
-      } else { layers.statArb = 0.5; }
+      // Layer 1: Stat Arb — VIX based
+      if (vixPrice > 22) { layers.statArb = 0.75; reasons.push(`VIX high (${vixPrice.toFixed(0)})`); }
+      else if (vixPrice < 13) { layers.statArb = 0.75; reasons.push(`VIX low (${vixPrice.toFixed(0)})`); }
 
-      // Layer 2: Mean Reversion
+      // Layer 2: Mean Reversion (INTRADAY RSI — changes throughout day)
       if (rsi < 25) { layers.meanRev = 0.9; direction = "LONG"; reasons.push(`RSI oversold (${rsi.toFixed(0)})`); }
       else if (rsi > 75) { layers.meanRev = 0.9; direction = "SHORT"; reasons.push(`RSI overbought (${rsi.toFixed(0)})`); }
       else if (rsi < 35) { layers.meanRev = 0.65; direction = "LONG"; reasons.push(`RSI low (${rsi.toFixed(0)})`); }
       else if (rsi > 65) { layers.meanRev = 0.65; direction = "SHORT"; reasons.push(`RSI high (${rsi.toFixed(0)})`); }
-      else { layers.meanRev = 0.4; }
 
-      if (Math.abs(zScore) > 2) { layers.meanRev = Math.min(layers.meanRev + 0.2, 1); reasons.push(`Z-score extreme (${zScore.toFixed(1)})`); }
-
-      // Layer 3: Momentum
-      const aboveSMA20 = price > sma20;
-      const aboveSMA50 = price > sma50;
-      if (aboveSMA20 && aboveSMA50 && change > 0.5) {
-        layers.momentum = 0.85; direction = "LONG"; reasons.push(`Uptrend (above SMAs, +${change.toFixed(1)}%)`);
-      } else if (!aboveSMA20 && !aboveSMA50 && change < -0.5) {
-        layers.momentum = 0.85; direction = "SHORT"; reasons.push(`Downtrend (below SMAs, ${change.toFixed(1)}%)`);
-      } else if (Math.abs(change) > 1.5) {
-        layers.momentum = 0.7; direction = change > 0 ? "LONG" : "SHORT"; reasons.push(`Big move (${change > 0 ? "+" : ""}${change.toFixed(1)}%)`);
-      } else { layers.momentum = 0.3; }
-
-      // PDC reaction — #1 edge in Indian markets
-      const pdcDist = Math.abs(price - pdc) / price * 100;
-      if (pdcDist < 0.3) {
-        layers.momentum = Math.min(layers.momentum + 0.2, 1);
-        reasons.push(`Near PDC (${pdc.toFixed(0)}) — institutional level`);
+      // Layer 3: Momentum (INTRADAY — uses live change %)
+      if (price > sma20 && changePct > 1) {
+        layers.momentum = 0.85; direction = "LONG";
+        reasons.push(`Bullish (+${changePct.toFixed(1)}%, above SMA)`);
+      } else if (price < sma20 && changePct < -1) {
+        layers.momentum = 0.85; direction = "SHORT";
+        reasons.push(`Bearish (${changePct.toFixed(1)}%, below SMA)`);
+      } else if (Math.abs(changePct) > 2) {
+        layers.momentum = 0.7;
+        direction = changePct > 0 ? "LONG" : "SHORT";
+        reasons.push(`Big move (${changePct > 0 ? "+" : ""}${changePct.toFixed(1)}%)`);
       }
 
-      // Layer 4: Vol Arb — VIX level
+      // PDC reaction
+      if (quote.prevClose > 0) {
+        const pdcDist = Math.abs(price - quote.prevClose) / price * 100;
+        if (pdcDist < 0.3 && Math.abs(changePct) < 0.5) {
+          layers.momentum = Math.min(layers.momentum + 0.15, 1);
+          reasons.push("Near PDC level");
+        }
+      }
+
+      // Layer 4: Vol Arb
       if (vixPrice > 20) {
-        layers.volArb = 0.8; // High VIX = sell premium or expect mean reversion
-        reasons.push(`VIX high (${vixPrice.toFixed(1)}) — premium rich`);
+        layers.volArb = 0.7; reasons.push("Premium rich (VIX >20)");
       } else if (vixPrice < 13) {
-        layers.volArb = 0.8; // Low VIX = buy premium, cheap options
-        reasons.push(`VIX low (${vixPrice.toFixed(1)}) — premium cheap`);
-      } else {
-        layers.volArb = 0.5;
+        layers.volArb = 0.8; reasons.push("Premium cheap (VIX <13)");
       }
 
-      // Layer 5: Flow — day of week edge from 5-year backtest
-      const today = new Date();
-      const dow = today.getDay();
-      if (dow === 1) { layers.flow = 0.65; reasons.push("Monday bullish bias (59.3% WR)"); } // Monday
-      else if (dow === 2) { layers.flow = 0.6; reasons.push("Tuesday best avg return"); } // Tuesday
-      else if (dow === 4) { layers.flow = 0.55; reasons.push("Thursday — expiry day"); } // Thursday
-      else { layers.flow = 0.5; }
+      // Layer 5: Flow — volume spike + day-of-week
+      if (volRatio > 1.5) {
+        layers.flow = 0.75; reasons.push(`Vol spike (${volRatio.toFixed(1)}x avg)`);
+      } else if (volRatio > 1.2) {
+        layers.flow = 0.6;
+      }
 
-      // Gap from PDC
-      if (change < -2) {
-        layers.flow = Math.min(layers.flow + 0.15, 1);
-        reasons.push(`After 2%+ drop — 67% reversal rate (5yr data)`);
+      const dow = new Date().getDay();
+      if (dow === 4) { // Thursday expiry
+        layers.flow = Math.min(layers.flow + 0.1, 1);
+        reasons.push("Expiry day");
       }
 
       // Composite score
-      const score = layers.statArb * 0.20 + layers.meanRev * 0.25 + layers.momentum * 0.20 + layers.volArb * 0.20 + layers.flow * 0.15;
+      const score = layers.statArb * 0.15 + layers.meanRev * 0.30 + layers.momentum * 0.25 + layers.volArb * 0.15 + layers.flow * 0.15;
 
-      if (score >= 0.5) {
-        const optionType = direction === "LONG" ? "CE" : "PE";
-        const strike = direction === "LONG" ? atm + stepSize : atm - stepSize; // 1 strike OTM
-        const estimatedPremium = name === "NIFTY" ? 150 : 250; // Rough estimate
-        const qty = lotSize; // 1 lot
-        const risk = estimatedPremium * qty; // Total premium at risk
+      if (score >= 0.55) {
+        const optType = direction === "LONG" ? "CE" as const : "PE" as const;
+        const atm = Math.round(price / info.step) * info.step;
+        const strike = direction === "LONG" ? atm : atm;
+        // Rough premium estimate based on ATR
+        const range = quote.high - quote.low;
+        const estimatedPremium = Math.max(range * 0.4, price * 0.005);
 
-        signals.push({
-          instrument: `${name}-${strike}-${optionType}`,
-          securityId: "", // Would need Dhan instrument mapping
-          type: optionType as "CE" | "PE",
-          strike,
-          expiry: "weekly", // Next Thursday
-          underlying: name,
-          score,
-          direction,
-          reason: reasons.join(" | "),
-          layers,
-          superOrder: {
-            transactionType: "BUY",
-            exchangeSegment: "NSE_FNO",
-            productType: "INTRADAY",
-            orderType: "LIMIT",
-            securityId: "", // Needs to be looked up from Dhan instruments
-            quantity: qty,
-            price: estimatedPremium,
-            targetPrice: estimatedPremium * 2.5, // 2.5x target
-            stopLossPrice: estimatedPremium * 0.4, // 60% SL
-            trailingJump: name === "NIFTY" ? 10 : 15,
-          },
+        allSignals.push({
+          name, instrument: `${name}-${strike}-${optType}`, type: optType, strike, score, direction,
+          reason: reasons.join(" | "), layers, price, changePct, rsi, lotSize: info.lot,
+          estimatedPremium: Math.round(estimatedPremium * 100) / 100,
         });
       }
     }
 
-    signals.sort((a, b) => b.score - a.score);
+    // Sort by score
+    allSignals.sort((a, b) => b.score - a.score);
+
+    // ── 4. Deduplicate: skip already-alerted signals ──
+    const now = Date.now();
+    const newSignals = allSignals.filter(s => {
+      const key = s.instrument;
+      const lastAlert = alertedSignals.get(key) || 0;
+      return now - lastAlert > ALERT_COOLDOWN;
+    });
 
     // ── 5. Build response ──
-    const niftyBias = niftyChange > 1 ? "BULLISH" : niftyChange < -1 ? "BEARISH" : niftyRSI < 35 ? "OVERSOLD" : niftyRSI > 65 ? "OVERBOUGHT" : "NEUTRAL";
-    const bnBias = bnChange > 1 ? "BULLISH" : bnChange < -1 ? "BEARISH" : bnRSI < 35 ? "OVERSOLD" : bnRSI > 65 ? "OVERBOUGHT" : "NEUTRAL";
+    const instrumentData = toScan.map(x => ({
+      name: x.name, price: x.quote?.price, changePct: x.quote?.changePct,
+      volume: x.quote?.volume, rsi: calcRSI(candleResults[toScan.indexOf(x)]?.status === "fulfilled" ? (candleResults[toScan.indexOf(x)] as PromiseFulfilledResult<number[]>).value : []),
+    }));
 
-    const analysis = {
-      nifty: {
-        price: niftyPrice, change: niftyChange, rsi: niftyRSI, sma20: niftySMA20, sma50: niftySMA50,
-        zScore: niftyZScore, realizedVol: niftyRealVol, pdc: niftyPDC, atm: niftyATM, bias: niftyBias,
-      },
-      banknifty: {
-        price: bnPrice, change: bnChange, rsi: bnRSI, sma20: bnSMA20, sma50: bnSMA50,
-        zScore: bnZScore, realizedVol: bnRealVol, pdc: bnPDC, atm: bnATM, bias: bnBias,
-      },
+    const response = {
+      instruments: instrumentData,
       vix: vixPrice,
-      signals: signals.map(s => ({
-        instrument: s.instrument, score: +s.score.toFixed(3), direction: s.direction,
-        reason: s.reason, strike: s.strike, type: s.type, underlying: s.underlying,
-        layers: Object.fromEntries(Object.entries(s.layers).map(([k, v]) => [k, +v.toFixed(2)])),
-        superOrder: s.superOrder,
-      })),
-      signalsAbove60: signals.filter(s => s.score >= 0.6).length,
-      signalsAbove70: signals.filter(s => s.score >= 0.7).length,
-      timestamp: Date.now(),
       marketHours: isMarketHours(),
+      totalScanned: toScan.length,
+      totalFnOStocks: Object.keys(INSTRUMENTS).length,
+      signals: allSignals.slice(0, 10).map(s => ({
+        ...s, layers: Object.fromEntries(Object.entries(s.layers).map(([k, v]) => [k, +v.toFixed(2)])),
+        score: +s.score.toFixed(3),
+      })),
+      newSignals: newSignals.slice(0, 5).map(s => s.instrument),
+      signalsAbove60: allSignals.filter(s => s.score >= 0.6).length,
+      signalsAbove70: allSignals.filter(s => s.score >= 0.7).length,
+      timestamp: now,
     };
 
-    // ── 6. Auto-execute during market hours if signal is strong ──
-    if (autoExecute && isMarketHours()) {
-      const topSignal = signals.find(s => s.score >= 0.65);
-      if (topSignal) {
-        // Try to place via Dhan
-        try {
-          const bases = ["http://localhost:3000", "https://algomaster-pro.vercel.app"];
-          for (const base of bases) {
-            try {
-              const dhanRes = await fetch(`${base}/api/dhan`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  action: "place-super-order",
-                  ...topSignal.superOrder,
-                }),
-              });
-              if (dhanRes.ok) {
-                const result = await dhanRes.json();
-                if (result.success) {
-                  await sendTg([
-                    `⚡ *INDIA TRADE EXECUTED (Dhan Super Order)*`,
-                    ``,
-                    `📊 ${topSignal.instrument}`,
-                    `🎯 Score: ${(topSignal.score * 100).toFixed(0)}%`,
-                    `${topSignal.direction === "LONG" ? "🟢" : "🔴"} ${topSignal.direction}`,
-                    `💰 Entry: ₹${topSignal.superOrder.price}`,
-                    `🎯 TP: ₹${topSignal.superOrder.targetPrice} (2.5x)`,
-                    `🛑 SL: ₹${topSignal.superOrder.stopLossPrice}`,
-                    ``,
-                    `📋 ${topSignal.reason}`,
-                    ``,
-                    `Order: ${result.orderId || "placed"}`,
-                  ].join("\n"));
-                  break;
-                }
-              }
-            } catch { /* try next base */ }
-          }
-        } catch { /* */ }
+    // ── 6. Alert on new signals ──
+    if (newSignals.filter(s => s.score >= 0.6).length > 0) {
+      const top3 = newSignals.filter(s => s.score >= 0.6).slice(0, 3);
+      const lines = [`🇮🇳 *India Market Signals*\n`];
+      lines.push(`VIX: ${vixPrice.toFixed(1)} | Market: ${isMarketHours() ? "OPEN" : "CLOSED"}\n`);
+
+      for (const s of top3) {
+        const emoji = s.direction === "LONG" ? "🟢" : "🔴";
+        lines.push(`${emoji} *${s.instrument}*`);
+        lines.push(`  Score: ${(s.score * 100).toFixed(0)}% | ₹${s.price.toLocaleString()} (${s.changePct >= 0 ? "+" : ""}${s.changePct.toFixed(1)}%)`);
+        lines.push(`  RSI: ${s.rsi.toFixed(0)} | Lot: ${s.lotSize} | Premium: ~₹${s.estimatedPremium}`);
+        lines.push(`  _${s.reason}_\n`);
+
+        // Mark as alerted
+        alertedSignals.set(s.instrument, now);
+      }
+
+      // Top movers context
+      const topMovers = sortedByMove.slice(0, 5);
+      lines.push(`📊 *Top Movers:*`);
+      for (const m of topMovers) {
+        const emoji = (m.quote?.changePct || 0) >= 0 ? "🟢" : "🔴";
+        lines.push(`  ${emoji} ${m.name}: ₹${m.quote?.price?.toLocaleString()} (${(m.quote?.changePct || 0) >= 0 ? "+" : ""}${m.quote?.changePct?.toFixed(1)}%)`);
+      }
+
+      await sendTg(lines.join("\n"));
+
+      // Auto-execute during market hours
+      if (autoExecute && isMarketHours() && top3.length > 0) {
+        const best = top3[0];
+        await sendTg(`⚡ *Signal: ${best.instrument}*\nScore: ${(best.score * 100).toFixed(0)}% | ${best.direction}\nExecute via Dhan Super Order:\n\`/buy ${best.name} ${best.lotSize} ${best.strike} ${best.type}\``);
       }
     }
 
-    // ── 7. Alert on Telegram if strong signal found ──
-    if (signals.filter(s => s.score >= 0.6).length > 0) {
-      const top = signals[0];
-      await sendTg([
-        `🇮🇳 *Indian Market Signal*`,
-        ``,
-        `NIFTY: ₹${niftyPrice.toLocaleString()} | RSI: ${niftyRSI.toFixed(0)} | ${niftyBias}`,
-        `BANKNIFTY: ₹${bnPrice.toLocaleString()} | RSI: ${bnRSI.toFixed(0)} | ${bnBias}`,
-        `VIX: ${vixPrice.toFixed(1)}`,
-        ``,
-        `🎯 *Top Signal: ${top.instrument}*`,
-        `Score: ${(top.score * 100).toFixed(0)}% | ${top.direction}`,
-        `${top.reason}`,
-        ``,
-        `Super Order: Buy ${top.superOrder.quantity}x @ ₹${top.superOrder.price}`,
-        `TP: ₹${top.superOrder.targetPrice} | SL: ₹${top.superOrder.stopLossPrice}`,
-        autoExecute && isMarketHours() ? `\n⚡ Auto-executing...` : `\n💡 Market ${isMarketHours() ? "open" : "closed"} — ${isMarketHours() ? "execute via /buy" : "will execute at open"}`,
-      ].join("\n"));
-    }
-
-    return NextResponse.json(analysis);
+    return NextResponse.json(response);
 
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
-}
-
-function isMarketHours(): boolean {
-  const now = new Date();
-  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
-  const hour = ist.getHours();
-  const min = ist.getMinutes();
-  const totalMin = hour * 60 + min;
-  const day = ist.getDay();
-  // Market: Mon-Fri, 9:15 AM - 3:30 PM IST
-  return day >= 1 && day <= 5 && totalMin >= 555 && totalMin <= 930;
 }
