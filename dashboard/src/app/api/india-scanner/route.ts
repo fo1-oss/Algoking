@@ -462,6 +462,7 @@ interface Signal {
     volArb: number;
     flow: number;
     oiGreeks: number;
+    mlSignal: number;
   };
   price: number;
   changePct: number;
@@ -480,6 +481,32 @@ interface Signal {
     atmTheta: number;
   };
   dhanSecurityId?: string;
+  ml?: {
+    direction: string;
+    confidence: number;
+    probLong: number;
+    probShort: number;
+  };
+}
+
+// ── ML Prediction Server (localhost:5055) ──
+const ML_SERVER = process.env.ML_SERVER_URL || "http://localhost:5055";
+
+async function fetchMLPredictions(symbols: string[]): Promise<Record<string, { direction: string; confidence: number; prob_long: number; prob_short: number; prob_neutral: number }>> {
+  try {
+    const res = await fetch(`${ML_SERVER}/predict/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols }),
+      signal: AbortSignal.timeout(5000), // 5s timeout — don't block scanner
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    return (data.predictions || {}) as Record<string, { direction: string; confidence: number; prob_long: number; prob_short: number; prob_neutral: number }>;
+  } catch {
+    // ML server not running — graceful fallback
+    return {};
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -696,8 +723,13 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── ML Predictions (parallel, non-blocking) ──
+    const mlSymbols = toDeepScan.map(x => x.sym);
+    const mlPredictions = await fetchMLPredictions(mlSymbols);
+    const mlAvailable = Object.keys(mlPredictions).length > 0;
+
     // ══════════════════════════════════════════════════════════════════
-    // PHASE 3: 6-Layer Scoring Engine
+    // PHASE 3: 7-Layer Scoring Engine (6 + ML)
     // ══════════════════════════════════════════════════════════════════
 
     const allSignals: Signal[] = [];
@@ -732,6 +764,7 @@ export async function GET(req: NextRequest) {
         volArb: 0.5,
         flow: 0.5,
         oiGreeks: 0.5,
+        mlSignal: 0.5,
       };
       const reasons: string[] = [];
       let direction: "LONG" | "SHORT" = "LONG";
@@ -870,14 +903,41 @@ export async function GET(req: NextRequest) {
         }
       }
 
-      // ── Composite Score (6 layers) ──
-      const score =
-        layers.statArb * 0.10 +
-        layers.meanRev * 0.25 +
-        layers.momentum * 0.20 +
-        layers.volArb * 0.15 +
-        layers.flow * 0.15 +
-        layers.oiGreeks * 0.15;
+      // ── Layer 7 (15%): ML Prediction — XGBoost + LightGBM ensemble ──
+      const mlPred = mlPredictions[sym];
+      if (mlPred && mlPred.confidence > 0) {
+        const mlDir = mlPred.direction;
+        const mlConf = mlPred.confidence;
+
+        if (mlDir === "LONG" && mlConf > 0.5) {
+          layers.mlSignal = 0.3 + mlConf * 0.7; // Scale 0.65-1.0
+          if (direction !== "SHORT") direction = "LONG";
+          reasons.push(`ML: LONG (${(mlConf * 100).toFixed(0)}%)`);
+        } else if (mlDir === "SHORT" && mlConf > 0.5) {
+          layers.mlSignal = 0.3 + mlConf * 0.7;
+          if (direction !== "LONG") direction = "SHORT";
+          reasons.push(`ML: SHORT (${(mlConf * 100).toFixed(0)}%)`);
+        } else if (mlDir === "NEUTRAL") {
+          layers.mlSignal = 0.3; // Neutral dampens the signal
+          reasons.push(`ML: Neutral (${(mlConf * 100).toFixed(0)}%)`);
+        }
+      }
+
+      // ── Composite Score (7 layers, ML-weighted when available) ──
+      const score = mlAvailable
+        ? layers.statArb * 0.08 +
+          layers.meanRev * 0.20 +
+          layers.momentum * 0.17 +
+          layers.volArb * 0.12 +
+          layers.flow * 0.13 +
+          layers.oiGreeks * 0.15 +
+          layers.mlSignal * 0.15
+        : layers.statArb * 0.10 +
+          layers.meanRev * 0.25 +
+          layers.momentum * 0.20 +
+          layers.volArb * 0.15 +
+          layers.flow * 0.15 +
+          layers.oiGreeks * 0.15;
 
       if (score >= 0.55) {
         const optType = direction === "LONG" ? "CE" as const : "PE" as const;
@@ -911,6 +971,16 @@ export async function GET(req: NextRequest) {
           estimatedPremium: Math.round(estimatedPremium * 100) / 100,
           dhanSecurityId: secIdMap.get(sym),
         };
+
+        // Attach ML prediction data
+        if (mlPred && mlPred.confidence > 0) {
+          signal.ml = {
+            direction: mlPred.direction,
+            confidence: +mlPred.confidence.toFixed(4),
+            probLong: +(mlPred.prob_long || 0).toFixed(4),
+            probShort: +(mlPred.prob_short || 0).toFixed(4),
+          };
+        }
 
         // Attach OI data
         if (oc) {
@@ -962,6 +1032,7 @@ export async function GET(req: NextRequest) {
       totalIndices: allIndexSymbols.length,
       deepScanned: toDeepScan.length,
       optionChainsLoaded: optionChainMap.size,
+      mlPredictions: mlAvailable ? Object.keys(mlPredictions).length : 0,
       signals: allSignals.slice(0, 10).map(s => ({
         ...s,
         layers: Object.fromEntries(Object.entries(s.layers).map(([k, v]) => [k, +v.toFixed(2)])),
@@ -994,6 +1065,11 @@ export async function GET(req: NextRequest) {
         if (s.oi) {
           lines.push(`  📈 PCR: ${s.oi.pcr.toFixed(2)} | IV: ${s.oi.atmIV.toFixed(1)}% | Δ: ${s.oi.atmDelta.toFixed(2)} | Θ: ${s.oi.atmTheta.toFixed(1)}`);
           lines.push(`  🎯 Support: ${s.oi.maxPeOIStrike} (PE OI) | Resistance: ${s.oi.maxCeOIStrike} (CE OI)`);
+        }
+
+        // ML prediction line
+        if (s.ml) {
+          lines.push(`  🤖 ML: ${s.ml.direction} (${(s.ml.confidence * 100).toFixed(0)}% conf) | L=${(s.ml.probLong * 100).toFixed(0)}% S=${(s.ml.probShort * 100).toFixed(0)}%`);
         }
 
         lines.push(`  _${s.reason}_\n`);
