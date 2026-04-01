@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { FNO_STOCKS, FNO_INDICES } from "@/lib/fno-stocks";
-import { getDhanScripMap, type DhanScrip } from "@/lib/dhan-scrip-cache";
+import { getDhanScripMap, getOptionSecurityId, type DhanScrip } from "@/lib/dhan-scrip-cache";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -955,6 +955,17 @@ export async function GET(req: NextRequest) {
           estimatedPremium = Math.max(atr > 0 ? atr * 0.5 : range * 0.4, price * 0.005);
         }
 
+        // Resolve OPTION CONTRACT security ID (not underlying)
+        let optionSecId: string | undefined;
+        let optionLotSize = info.lot;
+        try {
+          const optScrip = await getOptionSecurityId(sym, atm, optType);
+          if (optScrip) {
+            optionSecId = optScrip.securityId;
+            optionLotSize = optScrip.lotSize || info.lot;
+          }
+        } catch { /* fallback to undefined — won't auto-execute */ }
+
         const signal: Signal = {
           name: sym,
           instrument: `${sym}-${atm}-${optType}`,
@@ -967,9 +978,9 @@ export async function GET(req: NextRequest) {
           price,
           changePct,
           rsi,
-          lotSize: info.lot,
+          lotSize: optionLotSize,
           estimatedPremium: Math.round(estimatedPremium * 100) / 100,
-          dhanSecurityId: secIdMap.get(sym),
+          dhanSecurityId: optionSecId,
         };
 
         // Attach ML prediction data

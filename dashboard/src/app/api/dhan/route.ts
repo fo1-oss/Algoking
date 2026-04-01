@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getOptionSecurityId } from "@/lib/dhan-scrip-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -456,6 +457,24 @@ export async function POST(req: NextRequest) {
         return NextResponse.json(result.data, { status: result.status });
       }
 
+      // ── Resolve Option Security ID from scrip master ──
+      case "resolve-option": {
+        const optScrip = await getOptionSecurityId(
+          body.underlying || "NIFTY",
+          Number(body.strike) || 0,
+          body.optionType || "CE",
+          body.expiry || undefined,
+        );
+        if (optScrip) {
+          return NextResponse.json({
+            securityId: optScrip.securityId,
+            tradingSymbol: optScrip.tradingSymbol,
+            lotSize: optScrip.lotSize,
+          });
+        }
+        return NextResponse.json({ error: "Option contract not found in scrip master" }, { status: 404 });
+      }
+
       // ── Option Chain ──
       case "option-chain": {
         const result = await dhanDataRequest("/optionchain", {
@@ -481,7 +500,7 @@ export async function POST(req: NextRequest) {
           actions: [
             "set-token", "disconnect",
             "place-order", "place-super-order", "modify-order", "modify-super-order", "cancel-order", "square-off-all",
-            "ltp", "ohlc", "quote", "historical", "intraday", "rolling-option", "option-chain", "expiry-list",
+            "ltp", "ohlc", "quote", "historical", "intraday", "rolling-option", "option-chain", "expiry-list", "resolve-option",
           ],
         }, { status: 400 });
     }

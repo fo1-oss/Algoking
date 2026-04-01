@@ -306,6 +306,27 @@ async function executeOnDhan(sig: Signal): Promise<{ success: boolean; message: 
     }
   }
 
+  // Fallback: try scrip master lookup via server-side API
+  if (!securityId) {
+    try {
+      const scripRes = await fetch("/api/dhan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "resolve-option",
+          underlying: parts[0], // "NIFTY" or "BANKNIFTY"
+          strike: parseFloat(strikeStr),
+          optionType,
+          expiry: nearestExpiry,
+        }),
+      });
+      if (scripRes.ok) {
+        const scripData = await scripRes.json();
+        securityId = String(scripData.securityId || "");
+      }
+    } catch { /* final fallback failed */ }
+  }
+
   if (!securityId) {
     const debugInfo = nearestExpiry ? `expiry=${nearestExpiry}` : "no expiry found";
     return { success: false, message: `Could not resolve security ID for ${sig.symbol} (${debugInfo}). Check Dhan connection.` };
