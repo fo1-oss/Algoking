@@ -242,96 +242,44 @@ const CONF_COLORS: Record<string, string> = { HIGH: "text-[#BFFF00]", MEDIUM: "t
 
 // Dhan security IDs for common NIFTY/BANKNIFTY options (NSE_FNO)
 // These are the Dhan instrument IDs — updated monthly
-const DHAN_LOT_SIZES: Record<string, number> = { NIFTY: 25, BANKNIFTY: 15 };
-
 async function executeOnDhan(sig: Signal): Promise<{ success: boolean; message: string }> {
-  const isNifty = sig.symbol.includes("NIFTY") && !sig.symbol.includes("BANKNIFTY");
-  const isBankNifty = sig.symbol.includes("BANKNIFTY");
-  const lotSize = isBankNifty ? DHAN_LOT_SIZES.BANKNIFTY : DHAN_LOT_SIZES.NIFTY;
-
-  // Parse strike and option type from symbol like "NIFTY 22550 PE"
+  // Parse strike and option type from symbol like "NIFTY 22550 CE" or "RELIANCE 1300 CE"
   const parts = sig.symbol.split(" ");
   const optionType = parts[parts.length - 1]; // CE or PE
   const strikeStr = parts[parts.length - 2];
+  const underlying = parts.slice(0, -2).join(" "); // "NIFTY", "BANKNIFTY", "RELIANCE", etc.
 
-  const underlyingScrip = isBankNifty ? 25 : 13;
+  // Step 1: Resolve option contract via scrip master (gets correct securityId + lotSize)
+  let securityId = "";
+  let lotSize = 0;
 
-  // Step 1: Get nearest expiry from Dhan
-  let nearestExpiry = "";
   try {
-    const expiryRes = await fetch("/api/dhan", {
+    const scripRes = await fetch("/api/dhan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "expiry-list", underlyingScrip, underlyingSeg: "IDX_I" }),
+      body: JSON.stringify({
+        action: "resolve-option",
+        underlying,
+        strike: parseFloat(strikeStr),
+        optionType,
+      }),
     });
-    if (expiryRes.ok) {
-      const expiryData = await expiryRes.json();
-      // Dhan returns array of "YYYY-MM-DD" strings
-      const list: string[] = expiryData.data || expiryData || [];
-      const today = new Date().toISOString().slice(0, 10);
-      nearestExpiry = list.find((d: string) => d >= today) || list[0] || "";
+    if (scripRes.ok) {
+      const scripData = await scripRes.json();
+      securityId = String(scripData.securityId || "");
+      lotSize = Number(scripData.lotSize || 0);
     }
-  } catch { /* will try without expiry */ }
-
-  // Step 2: Fetch option chain with expiry
-  const chainRes = await fetch("/api/dhan", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "option-chain",
-      underlyingScrip,
-      underlyingSeg: "IDX_I",
-      ...(nearestExpiry ? { expiry: nearestExpiry } : {}),
-    }),
-  });
-
-  let securityId = "";
-  if (chainRes.ok) {
-    const chainData = await chainRes.json();
-    const strike = parseFloat(strikeStr);
-    // Dhan option chain format: { oc: [{ strikePrice, callOption: { securityId }, putOption: { securityId } }] }
-    const ocList: { strikePrice?: number; callOption?: { securityId?: string }; putOption?: { securityId?: string } }[] =
-      chainData.oc || chainData.data?.oc || [];
-    const match = ocList.find((o) => Number(o.strikePrice) === strike);
-    if (match) {
-      const side = optionType === "CE" ? match.callOption : match.putOption;
-      securityId = String(side?.securityId || "");
-    }
-    // Fallback: flat array format
-    if (!securityId) {
-      const flat: { strikePrice?: number; optionType?: string; securityId?: string }[] =
-        Array.isArray(chainData) ? chainData : Array.isArray(chainData.data) ? chainData.data : [];
-      const flatMatch = flat.find((o) => Number(o.strikePrice) === strike && o.optionType === optionType);
-      if (flatMatch) securityId = String(flatMatch.securityId || "");
-    }
-  }
-
-  // Fallback: try scrip master lookup via server-side API
-  if (!securityId) {
-    try {
-      const scripRes = await fetch("/api/dhan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "resolve-option",
-          underlying: parts[0], // "NIFTY" or "BANKNIFTY"
-          strike: parseFloat(strikeStr),
-          optionType,
-          expiry: nearestExpiry,
-        }),
-      });
-      if (scripRes.ok) {
-        const scripData = await scripRes.json();
-        securityId = String(scripData.securityId || "");
-      }
-    } catch { /* final fallback failed */ }
-  }
+  } catch { /* resolve failed */ }
 
   if (!securityId) {
-    const debugInfo = nearestExpiry ? `expiry=${nearestExpiry}` : "no expiry found";
-    return { success: false, message: `Could not resolve security ID for ${sig.symbol} (${debugInfo}). Check Dhan connection.` };
+    return { success: false, message: `Could not resolve security ID for ${sig.symbol}. Check Dhan connection.` };
   }
 
+  if (!lotSize) {
+    return { success: false, message: `Could not determine lot size for ${underlying}. Check scrip master.` };
+  }
+
+  // Step 2: Place order with correct lot size from scrip master
   const res = await fetch("/api/dhan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -349,7 +297,7 @@ async function executeOnDhan(sig: Signal): Promise<{ success: boolean; message: 
 
   const data = await res.json();
   if (data.success || data.orderId) {
-    return { success: true, message: `Order placed! ID: ${data.orderId || data.correlationId}` };
+    return { success: true, message: `Order placed! ${underlying} ${strikeStr} ${optionType} × ${lotSize} qty. ID: ${data.orderId || data.correlationId}` };
   }
   return { success: false, message: data.error || data.message || JSON.stringify(data) };
 }
@@ -364,6 +312,48 @@ export default function AlgoSignalsPanel() {
   const [executing, setExecuting] = useState<string | null>(null);
   const [execResults, setExecResults] = useState<Record<string, { success: boolean; message: string }>>({});
 
+  // Fetch stock signals from scanner API
+  const fetchScannerSignals = useCallback(async () => {
+    try {
+      const res = await fetch("/api/india-scanner");
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.signals || !Array.isArray(data.signals)) return;
+
+      // Convert scanner signals to UI Signal format
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const stockSignals: Signal[] = data.signals.map((s: any, i: number) => {
+        const entry = s.estimatedPremium || 100;
+        const isLong = s.direction === "LONG";
+        const sl = +(entry * 0.65).toFixed(0);   // 35% SL
+        const target = +(entry * 1.6).toFixed(0); // 60% target
+        return {
+          id: `scan_${s.instrument || s.name}_${i}`,
+          time: new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }),
+          symbol: s.instrument?.replace(/-/g, " ") || `${s.name} CE`,
+          strategy: s.ml ? `ML + ${Math.round(s.score * 100)}% Score` : `Scanner ${Math.round(s.score * 100)}%`,
+          side: isLong ? "BUY" as const : "SELL" as const,
+          entry,
+          sl,
+          target,
+          riskReward: `${((target - entry) / (entry - sl)).toFixed(1)}:1`,
+          confidence: s.score >= 0.7 ? "HIGH" as const : s.score >= 0.55 ? "MEDIUM" as const : "LOW" as const,
+          status: "ACTIVE" as const,
+          reason: s.reason || `${s.name} ${s.direction} — Score: ${Math.round(s.score * 100)}%`,
+          timeframe: "15m",
+        };
+      });
+
+      if (stockSignals.length > 0) {
+        setSignals(prev => {
+          // Keep existing ICT/local signals, add new scanner signals (avoid duplicates)
+          const existing = prev.filter(s => !s.id.startsWith("scan_"));
+          return [...existing, ...stockSignals];
+        });
+      }
+    } catch { /* scanner offline — use local signals only */ }
+  }, []);
+
   useEffect(() => {
     const nifty = tickers.find(t => t.symbol === "^NSEI" || t.displayName === "NIFTY");
     const bn = tickers.find(t => t.symbol === "^NSEBANK" || t.displayName === "BANKNIFTY");
@@ -374,6 +364,13 @@ export default function AlgoSignalsPanel() {
       ));
     }
   }, [tickers]);
+
+  // Fetch scanner signals every 5 minutes
+  useEffect(() => {
+    fetchScannerSignals();
+    const interval = setInterval(fetchScannerSignals, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [fetchScannerSignals]);
 
   const filtered = filter === "ALL" ? signals :
     filter === "ACTIVE" ? signals.filter(s => s.status === "ACTIVE" || s.status === "PENDING") :
