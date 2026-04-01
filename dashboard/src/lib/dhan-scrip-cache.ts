@@ -159,9 +159,9 @@ export async function getFnoScripMap(): Promise<Map<string, DhanScrip>> {
     const idx = resolveColumns(lines[0]);
     if (!idx) throw new Error("Cannot parse scrip master header");
 
-    // Also need: expiry, strike, option type columns
+    // Also need: expiry date, strike, option type columns
     const header = lines[0].split(",").map(c => c.trim().toUpperCase());
-    const expiryIdx = header.findIndex(c => c.includes("EXPIRY"));
+    const expiryIdx = header.findIndex(c => c === "SEM_EXPIRY_DATE" || c.includes("EXPIRY_DATE"));
     const strikeIdx = header.findIndex(c => c.includes("STRIKE"));
     const optTypeIdx = header.findIndex(c => c.includes("OPTION_TYPE") || c === "SEM_OPTION_TYPE");
 
@@ -187,10 +187,16 @@ export async function getFnoScripMap(): Promise<Map<string, DhanScrip>> {
 
       if (!secId || !strike) continue;
 
-      // Extract underlying symbol from trading symbol or custom symbol
-      const sym = (customSym || tradingSym).replace(/-EQ$/i, "").trim();
-      // Build lookup key: "NIFTY|22750|CE|2026-04-03"
-      const key = `${sym}|${strike}|${optType}|${expiry}`;
+      // Extract underlying symbol from trading symbol: "NIFTY-Apr2026-22800-CE" → "NIFTY"
+      // Or "RELIANCE-Apr2026-1300-CE" → "RELIANCE"
+      const sym = tradingSym.split("-")[0].trim();
+      if (!sym) continue;
+
+      // Normalize expiry to YYYY-MM-DD format: "2026-04-07 14:30:00" → "2026-04-07"
+      const expiryDate = expiry.includes(" ") ? expiry.split(" ")[0] : expiry;
+
+      // Build lookup key: "NIFTY|22800|CE|2026-04-07"
+      const key = `${sym}|${strike}|${optType}|${expiryDate}`;
 
       map.set(key, {
         securityId: secId,
