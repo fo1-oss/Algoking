@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Crosshair, TrendingUp, TrendingDown, Clock, Target, Shield, Zap, AlertTriangle, FlaskConical, Loader2, Play, CheckCircle, XCircle } from "lucide-react";
 import { useMarketData } from "@/hooks/useYahooData";
 
@@ -32,7 +32,7 @@ function generateSignalsFromLivePrices(niftyPrice: number, bnPrice: number, nift
   // 2% risk per trade, position size = risk / SL
   const capital = 500000; // Starting capital — will be dynamic when Kite is connected
   const riskPerTrade = capital * 0.02; // ₹10,000 max risk
-  const lotSize = 25; // NIFTY lot size
+  const lotSize = 65; // NIFTY lot size (updated Jan 2026)
 
   // Signal 1: NIFTY directional based on actual change%
   const niftyOption = niftyTrend === "bullish" ? "CE" : "PE";
@@ -354,21 +354,70 @@ export default function AlgoSignalsPanel() {
     } catch { /* scanner offline — use local signals only */ }
   }, []);
 
+  // Track signal state across price updates — don't regenerate closed signals
+  const signalStateRef = React.useRef<Map<string, { status: Signal["status"]; pnl?: number; entryPrice: number }>>(new Map());
+
   useEffect(() => {
     const nifty = tickers.find(t => t.symbol === "^NSEI" || t.displayName === "NIFTY");
     const bn = tickers.find(t => t.symbol === "^NSEBANK" || t.displayName === "BANKNIFTY");
-    if (nifty?.price || bn?.price) {
-      setSignals(generateSignalsFromLivePrices(
-        nifty?.price || 22800, bn?.price || 52000,
-        nifty?.changePct || 0, bn?.changePct || 0
-      ));
-    }
+    if (!nifty?.price && !bn?.price) return;
+
+    const fresh = generateSignalsFromLivePrices(
+      nifty?.price || 22800, bn?.price || 52000,
+      nifty?.changePct || 0, bn?.changePct || 0
+    );
+
+    // Merge with tracked state: preserve HIT_TARGET / HIT_SL / pnl
+    const merged = fresh.map(sig => {
+      const tracked = signalStateRef.current.get(sig.id);
+      if (tracked && (tracked.status === "HIT_TARGET" || tracked.status === "HIT_SL")) {
+        return { ...sig, status: tracked.status, pnl: tracked.pnl };
+      }
+
+      // Check if price moved enough to trigger target or SL
+      // Estimate current premium from underlying price move
+      if (tracked && sig.status === "ACTIVE") {
+        const currentPrice = sig.symbol.includes("NIFTY") && !sig.symbol.includes("BANKNIFTY")
+          ? nifty?.price || 0 : bn?.price || 0;
+        const entryUnderlying = tracked.entryPrice;
+        const priceDelta = currentPrice - entryUnderlying;
+        const isCE = sig.symbol.includes("CE");
+        // Rough premium change: delta ≈ 0.5 for ATM
+        const premiumChange = (isCE ? priceDelta : -priceDelta) * 0.5;
+        const currentPremium = sig.entry + premiumChange;
+
+        if (currentPremium >= sig.target) {
+          const pnl = Math.round((sig.target - sig.entry) * 65); // lot size 65
+          signalStateRef.current.set(sig.id, { status: "HIT_TARGET", pnl, entryPrice: entryUnderlying });
+          return { ...sig, status: "HIT_TARGET" as const, pnl };
+        }
+        if (currentPremium <= sig.sl) {
+          const pnl = -Math.round((sig.entry - sig.sl) * 65);
+          signalStateRef.current.set(sig.id, { status: "HIT_SL", pnl, entryPrice: entryUnderlying });
+          return { ...sig, status: "HIT_SL" as const, pnl };
+        }
+      }
+
+      // First time seeing this signal — record entry underlying price
+      if (!tracked) {
+        const underlyingPrice = sig.symbol.includes("NIFTY") && !sig.symbol.includes("BANKNIFTY")
+          ? nifty?.price || 0 : bn?.price || 0;
+        signalStateRef.current.set(sig.id, { status: sig.status, entryPrice: underlyingPrice });
+      }
+
+      return sig;
+    });
+
+    setSignals(prev => {
+      const scannerSignals = prev.filter(s => s.id.startsWith("scan_"));
+      return [...merged, ...scannerSignals];
+    });
   }, [tickers]);
 
-  // Fetch scanner signals every 5 minutes
+  // Fetch scanner signals every 60 seconds for live updates
   useEffect(() => {
     fetchScannerSignals();
-    const interval = setInterval(fetchScannerSignals, 5 * 60 * 1000);
+    const interval = setInterval(fetchScannerSignals, 60 * 1000);
     return () => clearInterval(interval);
   }, [fetchScannerSignals]);
 
