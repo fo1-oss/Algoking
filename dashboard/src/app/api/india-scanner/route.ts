@@ -462,11 +462,11 @@ interface Signal {
     volArb: number;
     flow: number;
     oiGreeks: number;
-    mlSignal: number;
+    mlSignal?: number;
   };
   price: number;
   changePct: number;
-  rsi: number;
+  rsi?: number;
   lotSize: number;
   estimatedPremium: number;
   // OI + Greeks enrichment
@@ -661,10 +661,10 @@ export async function GET(req: NextRequest) {
       .filter(x => x.quote && x.quote.price > 0)
       .sort((a, b) => b.absChange - a.absChange);
 
-    // Top 20 stocks + all indices (max ~24 symbols for deep analysis)
+    // Top 50 stocks + all indices for deep analysis
     const toDeepScan = [
       ...sortedMovers.filter(x => x.isIndex),
-      ...sortedMovers.filter(x => !x.isIndex).slice(0, 20),
+      ...sortedMovers.filter(x => !x.isIndex).slice(0, 50),
     ];
 
     // ── Parallel: intraday candles for top movers ──
@@ -712,7 +712,7 @@ export async function GET(req: NextRequest) {
       const nearestExpiry = await fetchNearestExpiry(niftySecId, "IDX_I", creds!.token, creds!.clientId);
 
       if (nearestExpiry) {
-        const ocPromises = toDeepScan.slice(0, 15).map(async (x) => {
+        const ocPromises = toDeepScan.slice(0, 30).map(async (x) => {
           const secId = secIdMap.get(x.sym);
           if (!secId) return;
           const seg = x.isIndex ? "IDX_I" : "NSE_EQ";
@@ -1011,6 +1011,82 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── Quick-score remaining stocks (not in deep scan) using price action + ML ──
+    const deepScannedSyms = new Set(toDeepScan.map(x => x.sym));
+    const quickScoreSymbols = sortedMovers.filter(x => !deepScannedSyms.has(x.sym) && !x.isIndex && x.absChange >= 1.0);
+
+    // Fetch ML for quick-score stocks too
+    const quickMlSymbols = quickScoreSymbols.map(x => x.sym);
+    const quickMlPredictions = quickMlSymbols.length > 0 ? await fetchMLPredictions(quickMlSymbols) : {};
+
+    for (const x of quickScoreSymbols) {
+      const { sym, quote } = x;
+      if (!quote || !quote.price) continue;
+
+      const info = FNO_STOCKS[sym];
+      if (!info) continue;
+
+      const changePct = quote.changePct || 0;
+      const volRatio = quote.avgVolume > 1 ? quote.volume / quote.avgVolume : 1;
+      const price = quote.price;
+
+      // Simplified direction from price action
+      const direction = changePct > 0 ? "LONG" as const : "SHORT" as const;
+
+      // Quick 3-layer score: momentum + volume + ML
+      let momentumScore = Math.min(Math.abs(changePct) / 5, 1.0);  // 5% move = max
+      let flowScore = Math.min(volRatio / 3, 1.0);                  // 3x vol = max
+      let mlScore = 0.5;
+
+      const mlPred = quickMlPredictions[sym];
+      if (mlPred) {
+        const mlDir = (mlPred.direction || "").toUpperCase();
+        if (mlDir === direction) {
+          mlScore = 0.5 + (mlPred.confidence || 0) * 0.5;
+        } else if (mlDir !== "NEUTRAL") {
+          mlScore = 0.2;
+        }
+      }
+
+      const score = momentumScore * 0.4 + flowScore * 0.3 + mlScore * 0.3;
+
+      if (score >= 0.50) {
+        const optType = direction === "LONG" ? "CE" as const : "PE" as const;
+        const step = (info as { step?: number }).step || Math.pow(10, Math.floor(Math.log10(price / 20)));
+        const atm = Math.round(price / step) * step;
+        const estimatedPremium = Math.max(price * 0.008, 5);
+
+        let optionSecId: string | undefined;
+        try {
+          const optScrip = await getOptionSecurityId(sym, atm, optType);
+          if (optScrip) optionSecId = optScrip.securityId;
+        } catch { /* */ }
+
+        const reasons: string[] = [];
+        if (Math.abs(changePct) >= 2) reasons.push(`Move: ${changePct > 0 ? "+" : ""}${changePct.toFixed(1)}%`);
+        if (volRatio >= 1.5) reasons.push(`Vol: ${volRatio.toFixed(1)}x`);
+        if (mlPred && mlPred.direction !== "NEUTRAL") reasons.push(`ML: ${mlPred.direction} (${((mlPred.confidence || 0) * 100).toFixed(0)}%)`);
+
+        allSignals.push({
+          name: sym,
+          instrument: `${sym}-${atm}-${optType}`,
+          type: optType,
+          strike: atm,
+          score,
+          direction,
+          reason: reasons.join(" | ") || `${direction} momentum`,
+          layers: { statArb: 0.5, meanRev: 0.5, momentum: momentumScore, volArb: 0.5, flow: flowScore, oiGreeks: 0.5, ...(mlPred ? { mlSignal: mlScore } : {}) },
+          price,
+          changePct,
+          rsi: undefined,
+          lotSize: info.lot,
+          estimatedPremium: Math.round(estimatedPremium * 100) / 100,
+          dhanSecurityId: optionSecId,
+          ...(mlPred ? { ml: { direction: mlPred.direction, confidence: +(mlPred.confidence || 0).toFixed(4), probLong: +(mlPred.prob_long || 0).toFixed(4), probShort: +(mlPred.prob_short || 0).toFixed(4) } } : {}),
+        });
+      }
+    }
+
     // Sort by score
     allSignals.sort((a, b) => b.score - a.score);
 
@@ -1044,7 +1120,7 @@ export async function GET(req: NextRequest) {
       deepScanned: toDeepScan.length,
       optionChainsLoaded: optionChainMap.size,
       mlPredictions: mlAvailable ? Object.keys(mlPredictions).length : 0,
-      signals: allSignals.slice(0, 10).map(s => ({
+      signals: allSignals.slice(0, 20).map(s => ({
         ...s,
         layers: Object.fromEntries(Object.entries(s.layers).map(([k, v]) => [k, +v.toFixed(2)])),
         score: +s.score.toFixed(3),
@@ -1070,7 +1146,7 @@ export async function GET(req: NextRequest) {
         const emoji = s.direction === "LONG" ? "🟢" : "🔴";
         lines.push(`${emoji} *${s.instrument}*`);
         lines.push(`  Score: ${(s.score * 100).toFixed(0)}% | ₹${s.price.toLocaleString()} (${s.changePct >= 0 ? "+" : ""}${s.changePct.toFixed(1)}%)`);
-        lines.push(`  RSI: ${s.rsi.toFixed(0)} | Lot: ${s.lotSize} | Premium: ~₹${s.estimatedPremium}`);
+        lines.push(`  RSI: ${s.rsi != null ? s.rsi.toFixed(0) : "N/A"} | Lot: ${s.lotSize} | Premium: ~₹${s.estimatedPremium}`);
 
         // OI + Greeks line
         if (s.oi) {
