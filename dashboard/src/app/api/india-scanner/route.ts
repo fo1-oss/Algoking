@@ -78,15 +78,18 @@ async function dhanDataRequest(
 // ── Dhan GET request ──
 async function dhanGetRequest(
   path: string,
-  token: string
+  token: string,
+  clientId?: string
 ): Promise<{ ok: boolean; data: unknown }> {
   try {
+    const headers: Record<string, string> = {
+      "access-token": token,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    };
+    if (clientId) headers["client-id"] = clientId;
     const res = await fetch(`${DHAN_BASE}${path}`, {
-      headers: {
-        "access-token": token,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-      },
+      headers,
       cache: "no-store",
     });
     const ct = res.headers.get("content-type") || "";
@@ -516,10 +519,14 @@ export async function GET(req: NextRequest) {
 
   if (action !== "scan") return NextResponse.json({ actions: ["scan"] });
 
+  const debug = req.nextUrl.searchParams.get("debug") === "true";
+  const debugLog: string[] = [];
+
   try {
     const creds = forceYahoo ? null : await getDhanCredentials();
     const useDhan = !!creds;
     const now = Date.now();
+    if (debug) debugLog.push(`useDhan=${useDhan}, hasToken=${!!creds?.token}, hasClientId=${!!creds?.clientId}, clientId=${creds?.clientId || "none"}`);
 
     // ══════════════════════════════════════════════════════════════════
     // PHASE 1: Fetch quotes for ALL 209 F&O stocks
@@ -556,13 +563,17 @@ export async function GET(req: NextRequest) {
 
       // Single combined LTP call (all equity + index IDs in one request to avoid rate limits)
       // Dhan supports up to 1000 IDs per segment per call
+      if (debug) debugLog.push(`eqSecIds=${eqSecIds.length}, idxSecIds=${idxSecIds.length}`);
       const eqLTP = await fetchDhanLTP(eqSecIds, creds!.token, creds!.clientId, "NSE_EQ");
+      if (debug) debugLog.push(`eqLTP keys=${Object.keys(eqLTP).length}`);
       const idxLTP = idxSecIds.length > 0 ? await fetchDhanLTP(idxSecIds, creds!.token, creds!.clientId, "IDX_I") : {};
+      if (debug) debugLog.push(`idxLTP keys=${Object.keys(idxLTP).length}`);
       // OHLC only if LTP returned results (skip to save rate limit budget)
       const eqOHLC = Object.keys(eqLTP).length > 0
         ? await fetchDhanOHLC(eqSecIds, creds!.token, creds!.clientId, "NSE_EQ") : {};
       const idxOHLC = Object.keys(idxLTP).length > 0 && idxSecIds.length > 0
         ? await fetchDhanOHLC(idxSecIds, creds!.token, creds!.clientId, "IDX_I") : {};
+      if (debug) debugLog.push(`eqOHLC keys=${Object.keys(eqOHLC).length}, idxOHLC keys=${Object.keys(idxOHLC).length}`);
 
       // Merge into quoteMap
       const allLTP: Record<string, { ltp: number; oi?: number }> = { ...eqLTP, ...idxLTP };
@@ -603,7 +614,9 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Yahoo fallback (if Dhan returned < 50 quotes or rate-limited) ──
+    if (debug) debugLog.push(`quoteMap after Dhan=${quoteMap.size}`);
     if (quoteMap.size < 50) {
+      if (debug) debugLog.push("Triggering Yahoo fallback");
       const yahooSymbols = [
         ...Object.values(FNO_INDICES).map(i => i.yahoo),
         ...Object.values(FNO_STOCKS).map(s => s.yahoo),
@@ -1104,7 +1117,8 @@ export async function GET(req: NextRequest) {
       rsi: intradayResults.has(x.sym) ? calcRSI(intradayResults.get(x.sym)!.closes) : undefined,
     }));
 
-    const response = {
+    if (debug) debugLog.push(`quoteMap final=${quoteMap.size}, sortedMovers=${sortedMovers.length}, toDeepScan=${toDeepScan.length}`);
+    const response: Record<string, unknown> = {
       source: useDhan ? "dhan" : "yahoo",
       instruments: topMovers,
       vix: vixPrice,
@@ -1125,6 +1139,7 @@ export async function GET(req: NextRequest) {
       signalsAbove70: allSignals.filter(s => s.score >= 0.7).length,
       timestamp: now,
     };
+    if (debug) response.debug = debugLog;
 
     // ══════════════════════════════════════════════════════════════════
     // PHASE 5: Telegram alerts with OI + Greeks enrichment
@@ -1172,7 +1187,7 @@ export async function GET(req: NextRequest) {
         // Get available margin
         let availableMargin = 200000; // default ₹2L
         try {
-          const fundsRes = await dhanGetRequest("/fundlimit", creds!.token);
+          const fundsRes = await dhanGetRequest("/fundlimit", creds!.token, creds!.clientId);
           if (fundsRes.ok) {
             const funds = fundsRes.data as Record<string, unknown>;
             availableMargin = Number(funds.availabelBalance || funds.availableBalance || funds.sodLimit || 200000);
@@ -1182,7 +1197,7 @@ export async function GET(req: NextRequest) {
         // Check open positions — max 5 trades/day
         let openPositions = 0;
         try {
-          const posRes = await dhanGetRequest("/positions", creds!.token);
+          const posRes = await dhanGetRequest("/positions", creds!.token, creds!.clientId);
           if (posRes.ok && Array.isArray(posRes.data)) {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             openPositions = (posRes.data as any[]).filter((p: any) => p.netQty && p.netQty !== 0).length;
