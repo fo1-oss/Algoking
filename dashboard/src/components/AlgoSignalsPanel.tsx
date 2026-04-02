@@ -348,7 +348,7 @@ export default function AlgoSignalsPanel() {
         setSignals(prev => {
           // Keep existing ICT/local signals, add new scanner signals (avoid duplicates)
           const existing = prev.filter(s => !s.id.startsWith("scan_"));
-          return [...existing, ...stockSignals];
+          return [...stockSignals, ...existing];
         });
       }
     } catch { /* scanner offline — use local signals only */ }
