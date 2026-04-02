@@ -85,8 +85,8 @@ export async function getDhanScripMap(targetSymbols?: Set<string>): Promise<Map<
       const customSym = (cols[idx.customSymbol] || "").trim();
       const lot = parseInt(cols[idx.lotSize] || "1") || 1;
 
-      // Normalize symbol: remove -EQ suffix, trim
-      const sym = (customSym || tradingSym).replace(/-EQ$/i, "").trim();
+      // Use trading symbol (e.g. "RELIANCE", "TCS") — NOT custom symbol (e.g. "Reliance Industries")
+      const sym = tradingSym.replace(/-EQ$/i, "").trim();
 
       if (!sym || !secId) continue;
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { FNO_STOCKS, FNO_INDICES } from "@/lib/fno-stocks";
-import { getDhanScripMap, getOptionSecurityId, type DhanScrip } from "@/lib/dhan-scrip-cache";
+import { getOptionSecurityId } from "@/lib/dhan-scrip-cache";
+import { DHAN_FNO_SECIDS } from "@/lib/dhan-fno-secids";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -238,16 +239,14 @@ async function fetchDhanLTP(
   const result: Record<string, { ltp: number; oi?: number }> = {};
   if (securityIds.length === 0) return result;
 
-  // Dhan accepts max ~100 per call, batch them
-  const BATCH = 100;
-  for (let i = 0; i < securityIds.length; i += BATCH) {
-    const batch = securityIds.slice(i, i + BATCH);
-    const payload = { [segment]: batch.map(Number) };
+  // Dhan accepts all IDs in a single call per segment (up to 1000)
+  // Send everything at once to minimize API calls and avoid rate limits
+  const payload = { [segment]: securityIds.map(Number) };
+  try {
     const res = await dhanDataRequest("/marketfeed/ltp", payload, token, clientId);
-
     if (res.ok && res.data) {
       const data = res.data as Record<string, unknown>;
-      // Dhan returns { data: { "NSE_EQ": { "secId": { ltp, oi } } } } or flat
+      // Dhan returns { data: { "NSE_EQ": { "secId": { last_price } } } }
       const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
       for (const [secId, info] of Object.entries(segData)) {
         if (typeof info === "object" && info !== null) {
@@ -256,7 +255,7 @@ async function fetchDhanLTP(
         }
       }
     }
-  }
+  } catch { /* LTP call failed */ }
   return result;
 }
 
@@ -270,12 +269,9 @@ async function fetchDhanOHLC(
   const result: Record<string, { open: number; high: number; low: number; close: number; volume: number; prevClose: number }> = {};
   if (securityIds.length === 0) return result;
 
-  const BATCH = 100;
-  for (let i = 0; i < securityIds.length; i += BATCH) {
-    const batch = securityIds.slice(i, i + BATCH);
-    const payload = { [segment]: batch.map(Number) };
+  const payload = { [segment]: securityIds.map(Number) };
+  try {
     const res = await dhanDataRequest("/marketfeed/ohlc", payload, token, clientId);
-
     if (res.ok && res.data) {
       const data = res.data as Record<string, unknown>;
       const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
@@ -293,7 +289,7 @@ async function fetchDhanOHLC(
         }
       }
     }
-  }
+  } catch { /* OHLC call failed */ }
   return result;
 }
 
@@ -542,31 +538,31 @@ export async function GET(req: NextRequest) {
 
     if (useDhan) {
       // ── Dhan path: batch LTP + OHLC for all 209 stocks ──
-      const scripMap = await getDhanScripMap(new Set(allSymbols));
-
-      // Build security ID arrays per segment
+      // Use hardcoded security IDs (5KB) instead of downloading 32MB scrip master CSV
       const eqSecIds: string[] = [];
       const idxSecIds: string[] = [];
 
       for (const sym of allSymbols) {
-        const scrip = scripMap.get(sym);
-        if (scrip) {
-          secIdMap.set(sym, scrip.securityId);
-          if (scrip.segment === "I" || scrip.instrumentName === "INDEX") {
-            idxSecIds.push(scrip.securityId);
+        const entry = DHAN_FNO_SECIDS[sym];
+        if (entry) {
+          secIdMap.set(sym, entry.securityId);
+          if (entry.segment === "I" || entry.instrumentName === "INDEX") {
+            idxSecIds.push(entry.securityId);
           } else {
-            eqSecIds.push(scrip.securityId);
+            eqSecIds.push(entry.securityId);
           }
         }
       }
 
-      // Parallel: LTP + OHLC for equities + indices
-      const [eqLTP, eqOHLC, idxLTP, idxOHLC] = await Promise.all([
-        fetchDhanLTP(eqSecIds, creds!.token, creds!.clientId, "NSE_EQ"),
-        fetchDhanOHLC(eqSecIds, creds!.token, creds!.clientId, "NSE_EQ"),
-        idxSecIds.length > 0 ? fetchDhanLTP(idxSecIds, creds!.token, creds!.clientId, "IDX_I") : Promise.resolve({}),
-        idxSecIds.length > 0 ? fetchDhanOHLC(idxSecIds, creds!.token, creds!.clientId, "IDX_I") : Promise.resolve({}),
-      ]);
+      // Single combined LTP call (all equity + index IDs in one request to avoid rate limits)
+      // Dhan supports up to 1000 IDs per segment per call
+      const eqLTP = await fetchDhanLTP(eqSecIds, creds!.token, creds!.clientId, "NSE_EQ");
+      const idxLTP = idxSecIds.length > 0 ? await fetchDhanLTP(idxSecIds, creds!.token, creds!.clientId, "IDX_I") : {};
+      // OHLC only if LTP returned results (skip to save rate limit budget)
+      const eqOHLC = Object.keys(eqLTP).length > 0
+        ? await fetchDhanOHLC(eqSecIds, creds!.token, creds!.clientId, "NSE_EQ") : {};
+      const idxOHLC = Object.keys(idxLTP).length > 0 && idxSecIds.length > 0
+        ? await fetchDhanOHLC(idxSecIds, creds!.token, creds!.clientId, "IDX_I") : {};
 
       // Merge into quoteMap
       const allLTP: Record<string, { ltp: number; oi?: number }> = { ...eqLTP, ...idxLTP };
@@ -598,17 +594,16 @@ export async function GET(req: NextRequest) {
         });
       }
 
-      // VIX — try India VIX scrip
-      const vixScrip = scripMap.get("INDIA VIX") || scripMap.get("INDIAVIX");
-      if (vixScrip) {
-        const vixRes = await fetchDhanLTP([vixScrip.securityId], creds!.token, creds!.clientId, "IDX_I");
-        const vixData = vixRes[vixScrip.securityId];
+      // VIX — India VIX security ID is 26 on Dhan
+      try {
+        const vixRes = await fetchDhanLTP(["26"], creds!.token, creds!.clientId, "IDX_I");
+        const vixData = vixRes["26"];
         if (vixData?.ltp) vixPrice = vixData.ltp;
-      }
+      } catch { /* VIX fetch optional */ }
     }
 
-    // ── Yahoo fallback (if Dhan returned < 20 quotes) ──
-    if (quoteMap.size < 20) {
+    // ── Yahoo fallback (if Dhan returned < 50 quotes or rate-limited) ──
+    if (quoteMap.size < 50) {
       const yahooSymbols = [
         ...Object.values(FNO_INDICES).map(i => i.yahoo),
         ...Object.values(FNO_STOCKS).map(s => s.yahoo),
