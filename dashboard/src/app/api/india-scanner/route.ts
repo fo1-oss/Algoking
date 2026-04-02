@@ -285,14 +285,18 @@ async function fetchDhanOHLC(
         const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
         for (const [secId, info] of Object.entries(segData)) {
           if (typeof info === "object" && info !== null) {
-            const d = info as Record<string, number>;
+            // Dhan OHLC returns: { last_price, ohlc: { open, close, high, low } }
+            // "close" in ohlc is the previous day's close
+            const d = info as Record<string, unknown>;
+            const ohlc = (d.ohlc || d.OHLC || d) as Record<string, number>;
+            const ltp = (d.last_price || d.ltp || d.LTP || 0) as number;
             result[secId] = {
-              open: d.open || d.Open || 0,
-              high: d.high || d.High || 0,
-              low: d.low || d.Low || 0,
-              close: d.close || d.Close || d.ltp || d.LTP || 0,
-              volume: d.volume || d.Volume || 0,
-              prevClose: d.prev_close || d.prevClose || d.PrevClose || 0,
+              open: ohlc.open || ohlc.Open || 0,
+              high: ohlc.high || ohlc.High || 0,
+              low: ohlc.low || ohlc.Low || 0,
+              close: ltp || ohlc.close || ohlc.Close || 0,
+              volume: (d.volume || d.Volume || 0) as number,
+              prevClose: ohlc.close || ohlc.Close || 0,
             };
           }
         }
