@@ -232,7 +232,8 @@ async function sendTg(text: string) {
 // DHAN DATA FETCHERS
 // ══════════════════════════════════════════════════════════════════════
 
-// Batch LTP from Dhan — accepts up to 1000 security IDs per segment
+// Batch LTP from Dhan — chunked into batches of 50 (Dhan rejects >50 per call)
+const DHAN_BATCH = 50;
 async function fetchDhanLTP(
   securityIds: string[],
   token: string,
@@ -242,27 +243,29 @@ async function fetchDhanLTP(
   const result: Record<string, { ltp: number; oi?: number }> = {};
   if (securityIds.length === 0) return result;
 
-  // Dhan accepts all IDs in a single call per segment (up to 1000)
-  // Send everything at once to minimize API calls and avoid rate limits
-  const payload = { [segment]: securityIds.map(Number) };
-  try {
-    const res = await dhanDataRequest("/marketfeed/ltp", payload, token, clientId);
-    if (res.ok && res.data) {
-      const data = res.data as Record<string, unknown>;
-      // Dhan returns { data: { "NSE_EQ": { "secId": { last_price } } } }
-      const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
-      for (const [secId, info] of Object.entries(segData)) {
-        if (typeof info === "object" && info !== null) {
-          const d = info as Record<string, number>;
-          result[secId] = { ltp: d.last_price || d.ltp || d.LTP || 0, oi: d.oi || d.OI };
+  for (let i = 0; i < securityIds.length; i += DHAN_BATCH) {
+    const batch = securityIds.slice(i, i + DHAN_BATCH);
+    const payload = { [segment]: batch.map(Number) };
+    try {
+      const res = await dhanDataRequest("/marketfeed/ltp", payload, token, clientId);
+      if (res.ok && res.data) {
+        const data = res.data as Record<string, unknown>;
+        const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
+        for (const [secId, info] of Object.entries(segData)) {
+          if (typeof info === "object" && info !== null) {
+            const d = info as Record<string, number>;
+            result[secId] = { ltp: d.last_price || d.ltp || d.LTP || 0, oi: d.oi || d.OI };
+          }
         }
       }
-    }
-  } catch { /* LTP call failed */ }
+    } catch { /* batch failed */ }
+    // Small delay between batches to avoid rate limits
+    if (i + DHAN_BATCH < securityIds.length) await new Promise(r => setTimeout(r, 300));
+  }
   return result;
 }
 
-// Batch OHLC from Dhan
+// Batch OHLC from Dhan — chunked into batches of 50
 async function fetchDhanOHLC(
   securityIds: string[],
   token: string,
@@ -272,27 +275,31 @@ async function fetchDhanOHLC(
   const result: Record<string, { open: number; high: number; low: number; close: number; volume: number; prevClose: number }> = {};
   if (securityIds.length === 0) return result;
 
-  const payload = { [segment]: securityIds.map(Number) };
-  try {
-    const res = await dhanDataRequest("/marketfeed/ohlc", payload, token, clientId);
-    if (res.ok && res.data) {
-      const data = res.data as Record<string, unknown>;
-      const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
-      for (const [secId, info] of Object.entries(segData)) {
-        if (typeof info === "object" && info !== null) {
-          const d = info as Record<string, number>;
-          result[secId] = {
-            open: d.open || d.Open || 0,
-            high: d.high || d.High || 0,
-            low: d.low || d.Low || 0,
-            close: d.close || d.Close || d.ltp || d.LTP || 0,
-            volume: d.volume || d.Volume || 0,
-            prevClose: d.prev_close || d.prevClose || d.PrevClose || 0,
-          };
+  for (let i = 0; i < securityIds.length; i += DHAN_BATCH) {
+    const batch = securityIds.slice(i, i + DHAN_BATCH);
+    const payload = { [segment]: batch.map(Number) };
+    try {
+      const res = await dhanDataRequest("/marketfeed/ohlc", payload, token, clientId);
+      if (res.ok && res.data) {
+        const data = res.data as Record<string, unknown>;
+        const segData = (data.data as Record<string, Record<string, unknown>>)?.[segment] || data;
+        for (const [secId, info] of Object.entries(segData)) {
+          if (typeof info === "object" && info !== null) {
+            const d = info as Record<string, number>;
+            result[secId] = {
+              open: d.open || d.Open || 0,
+              high: d.high || d.High || 0,
+              low: d.low || d.Low || 0,
+              close: d.close || d.Close || d.ltp || d.LTP || 0,
+              volume: d.volume || d.Volume || 0,
+              prevClose: d.prev_close || d.prevClose || d.PrevClose || 0,
+            };
+          }
         }
       }
-    }
-  } catch { /* OHLC call failed */ }
+    } catch { /* batch failed */ }
+    if (i + DHAN_BATCH < securityIds.length) await new Promise(r => setTimeout(r, 300));
+  }
   return result;
 }
 
