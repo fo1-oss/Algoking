@@ -86,7 +86,7 @@ async function fetchLTP(): Promise<Record<string, { price: number; prevClose: nu
   }
 
   // Fallback with realistic current-ish prices
-  if (!result.NIFTY) {
+  if (!result.NIFTY || result.NIFTY.price <= 0) {
     const now = new Date();
     const hour = now.getHours();
     const isMarketHours = hour >= 9 && hour < 16;
@@ -223,7 +223,7 @@ function generateAlgoSignals(ltp: Record<string, { price: number; prevClose: num
   // ── Momentum RSI ──
   {
     // Simulate RSI from day's price action
-    const rsiEstimate = 50 + dayChangePct * 8;
+    const rsiEstimate = 50 + (isNaN(dayChangePct) ? 0 : dayChangePct) * 8;
     const isOversold = rsiEstimate < 38;
     const isOverbought = rsiEstimate > 68;
     const isActive = isMarketHours && (isOversold || isOverbought);
